@@ -1,0 +1,124 @@
+import re
+from typing import Optional, Dict, Any
+
+def parse_message_command(text: str) -> Optional[Dict[str, Any]]:
+    """
+    Parses a text message to check if it contains a configuration command.
+    Returns a dictionary of command arguments if parsed successfully, or None.
+    
+    Supported Commands:
+    1. Watch list of coins:
+       /watch XRP, ADA, UBUSDT, BTC
+       CONFIG WATCH XRP, ADA, UBUSDT, BTC
+       
+    2. Step threshold:
+       /set_step BTC 500
+       CONFIG STEP BTC 500
+       
+    3. Target price alerts:
+       /set_target BTC 65000 ABOVE
+       /set_target BTC 65000 BELOW
+       /set_target BTC 65000 (auto-detects ABOVE/BELOW relative to current price)
+       CONFIG TARGET BTC 65000
+       
+    4. Remove Step threshold:
+       /remove_step BTC
+       /clear_step BTC
+       CONFIG REMOVE_STEP BTC
+
+    5. Remove Target price alerts:
+       /remove_target BTC
+       /clear_targets BTC
+       CONFIG REMOVE_TARGET BTC
+
+    6. Status check:
+       /status
+       CONFIG STATUS
+
+    7. Help instructions:
+       /help
+       /start
+       CONFIG HELP
+    """
+    text = text.strip()
+    if not text:
+        return None
+
+    # 1. Watch Command
+    # Matches: /watch XRP, ADA, BTC or CONFIG WATCH XRP, ADA, BTC
+    watch_match = re.search(r"^(?:/watch|CONFIG\s+WATCH)\s+(.+)$", text, re.IGNORECASE)
+    if watch_match:
+        raw_list = watch_match.group(1)
+        # Split by comma and strip whitespaces, ignore empty entries
+        coins = [c.strip() for c in re.split(r",", raw_list) if c.strip()]
+        return {"type": "watch", "coins": coins}
+
+    # 2. Step Tracking Command
+    # Matches: /set_step BTC 500 or CONFIG STEP BTC 500
+    step_match = re.search(r"^(?:/set_step|CONFIG\s+STEP)\s+(\S+)\s+(\d+(?:\.\d+)?)$", text, re.IGNORECASE)
+    if step_match:
+        symbol = step_match.group(1).upper()
+        step_interval = float(step_match.group(2))
+        return {
+            "type": "step",
+            "symbol": symbol,
+            "step_interval": step_interval
+        }
+
+    # 3. Target Alerts Command
+    # Matches: /set_target BTC 65000 ABOVE or CONFIG TARGET BTC 65000
+    target_match = re.search(
+        r"^(?:/set_target|CONFIG\s+TARGET)\s+(\S+)\s+(\d+(?:\.\d+)?)(?:\s+(ABOVE|BELOW))?$", 
+        text, 
+        re.IGNORECASE
+    )
+    if target_match:
+        symbol = target_match.group(1).upper()
+        target_price = float(target_match.group(2))
+        condition = target_match.group(3)
+        if condition:
+            condition = condition.upper()
+        return {
+            "type": "target",
+            "symbol": symbol,
+            "target_price": target_price,
+            "condition": condition
+        }
+
+    # 4. Remove Step Tracking Command
+    # Matches: /remove_step BTC or /clear_step BTC or CONFIG REMOVE_STEP BTC
+    remove_step_match = re.search(
+        r"^(?:/remove_step|/clear_step|CONFIG\s+(?:REMOVE_STEP|CLEAR_STEP))\s+(\S+)$",
+        text,
+        re.IGNORECASE
+    )
+    if remove_step_match:
+        return {
+            "type": "remove_step",
+            "symbol": remove_step_match.group(1).upper()
+        }
+
+    # 5. Remove Target Price Alerts Command
+    # Matches: /remove_target BTC or /clear_targets BTC or CONFIG REMOVE_TARGET BTC
+    remove_target_match = re.search(
+        r"^(?:/remove_target|/clear_targets|CONFIG\s+(?:REMOVE_TARGET|CLEAR_TARGETS))\s+(\S+)$",
+        text,
+        re.IGNORECASE
+    )
+    if remove_target_match:
+        return {
+            "type": "remove_target",
+            "symbol": remove_target_match.group(1).upper()
+        }
+
+    # 5. Status Check Command
+    # Matches: /status or CONFIG STATUS
+    if re.search(r"^(?:/status|CONFIG\s+STATUS)$", text, re.IGNORECASE):
+        return {"type": "status"}
+
+    # 6. Help / Start Command
+    # Matches: /help, /start or CONFIG HELP
+    if re.search(r"^(?:/help|/start|CONFIG\s+HELP)$", text, re.IGNORECASE):
+        return {"type": "help"}
+
+    return None
