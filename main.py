@@ -1,14 +1,16 @@
 import os
 import asyncio
 import logging
+import datetime
 from typing import Any
 from telegram import Update
 from telegram.ext import Application, MessageHandler, filters, ContextTypes
 from dotenv import load_dotenv
 
-import database
+import db
 import price_fetcher
-from config_parser import parse_message_command
+import kline_service
+import bot
 
 # Configure Logging
 logging.basicConfig(
@@ -46,237 +48,27 @@ TARGET_CHAT_ID = parse_chat_id(TARGET_CHAT_ID_RAW)
 
 def format_price(price: float) -> str:
     """Formats prices cleanly for human readability."""
+    if price is None:
+        return "N/A"
     if price >= 1.0:
         return f"${price:,.2f}"
     else:
         return f"${price:,.6f}"
 
-async def handle_admin_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Listens to text updates, filters for the admin chat, and parses commands."""
-    msg = update.message or update.channel_post
-    if not msg or not msg.text:
-        return
-
-    # Filter out messages from non-admin chats
-    if msg.chat.id != ADMIN_CHAT_ID:
-        return
-
-    logger.info(f"Received admin command message: {msg.text} in chat {msg.chat.id}")
-
-    try:
-        command = parse_message_command(msg.text)
-        if not command:
-            # Not a recognized command
-            return
-
-        cmd_type = command["type"]
-
-        if cmd_type == "watch":
-            coins_list = command["coins"]
-            resolved_pairs = []
-            ignored_coins = []
-
-            # Look up prices to verify validity
-            all_resolved = [price_fetcher.resolve_symbol(c) for c in coins_list]
-            prices = await price_fetcher.fetch_prices(all_resolved)
-
-            for c in coins_list:
-                res = price_fetcher.resolve_symbol(c)
-                if res in prices:
-                    resolved_pairs.append((res, c))
-                else:
-                    ignored_coins.append(c)
-
-            database.update_watched_coins(resolved_pairs)
-
-            response = "✅ *Watchlist Updated!*\n\n"
-            if resolved_pairs:
-                response += "*Monitored Assets:*\n"
-                for res, orig in resolved_pairs:
-                    price = prices[res]
-                    response += f"• *{orig}* ({res}): {format_price(price)}\n"
-            else:
-                response += "No active assets in the watchlist.\n"
-
-            if ignored_coins:
-                response += f"\n⚠️ *Ignored invalid symbols:* {', '.join(ignored_coins)}"
-
-            await msg.reply_text(response, parse_mode="Markdown")
-
-        elif cmd_type == "step":
-            user_symbol = command["symbol"]
-            step_interval = command["step_interval"]
-            resolved = price_fetcher.resolve_symbol(user_symbol)
-
-            prices = await price_fetcher.fetch_prices([resolved])
-            if resolved not in prices:
-                await msg.reply_text(f"❌ Could not find price for *{user_symbol}* on Binance.", parse_mode="Markdown")
-                return
-
-            current_price = prices[resolved]
-
-            # Auto-watch if not watched
-            watched = database.get_watched_coins()
-            if not any(w["symbol"] == resolved for w in watched):
-                new_watched = [(w["symbol"], w["user_symbol"]) for w in watched]
-                new_watched.append((resolved, user_symbol))
-                database.update_watched_coins(new_watched)
-
-            database.set_step_alert(resolved, step_interval, current_price)
-
-            response = (
-                f"✅ *Step Alert Configured!*\n\n"
-                f"Asset: *{user_symbol}* ({resolved})\n"
-                f"Step Interval: *{format_price(step_interval)}*\n"
-                f"Baseline Price: *{format_price(current_price)}*\n"
-                f"Alerting on every price change of {format_price(step_interval)}."
-            )
-            await msg.reply_text(response, parse_mode="Markdown")
-
-        elif cmd_type == "target":
-            user_symbol = command["symbol"]
-            target_price = command["target_price"]
-            condition = command["condition"]
-            resolved = price_fetcher.resolve_symbol(user_symbol)
-
-            prices = await price_fetcher.fetch_prices([resolved])
-            if resolved not in prices:
-                await msg.reply_text(f"❌ Could not find price for *{user_symbol}* on Binance.", parse_mode="Markdown")
-                return
-
-            current_price = prices[resolved]
-
-            # Auto-detect ABOVE/BELOW if not supplied
-            if not condition:
-                condition = "ABOVE" if target_price > current_price else "BELOW"
-
-            # Auto-watch if not watched
-            watched = database.get_watched_coins()
-            if not any(w["symbol"] == resolved for w in watched):
-                new_watched = [(w["symbol"], w["user_symbol"]) for w in watched]
-                new_watched.append((resolved, user_symbol))
-                database.update_watched_coins(new_watched)
-
-            database.add_target_alert(resolved, target_price, condition)
-
-            response = (
-                f"✅ *Target Alert Configured!*\n\n"
-                f"Asset: *{user_symbol}* ({resolved})\n"
-                f"Target Price: *{format_price(target_price)}*\n"
-                f"Trigger Condition: *{condition}*\n"
-                f"Current Price: *{format_price(current_price)}*"
-            )
-            await msg.reply_text(response, parse_mode="Markdown")
-
-        elif cmd_type == "remove_step":
-            user_symbol = command["symbol"]
-            resolved = price_fetcher.resolve_symbol(user_symbol)
-            database.remove_step_alert(resolved)
-            response = (
-                f"✅ *Step Alert Removed!*\n\n"
-                f"Removed step tracker configuration for *{user_symbol}* ({resolved})."
-            )
-            await msg.reply_text(response, parse_mode="Markdown")
-
-        elif cmd_type == "remove_target":
-            user_symbol = command["symbol"]
-            resolved = price_fetcher.resolve_symbol(user_symbol)
-            database.clear_target_alerts(resolved)
-            response = (
-                f"✅ *Target Alerts Removed!*\n\n"
-                f"Removed all active target price alerts for *{user_symbol}* ({resolved})."
-            )
-            await msg.reply_text(response, parse_mode="Markdown")
-
-        elif cmd_type == "status":
-            watched = database.get_watched_coins()
-            targets = database.get_active_target_alerts()
-            steps = database.get_step_alerts()
-
-            if not watched:
-                await msg.reply_text("📊 *Bot Status*: No assets are currently monitored.", parse_mode="Markdown")
-                return
-
-            resolved_symbols = [w["symbol"] for w in watched]
-            prices = await price_fetcher.fetch_prices(resolved_symbols)
-
-            response = "📊 *Current Alert Bot Status*\n\n"
-            response += "*Watched Assets & Prices:*\n"
-            for w in watched:
-                sym = w["symbol"]
-                user_sym = w["user_symbol"]
-                price_str = format_price(prices[sym]) if sym in prices else "Price lookup error"
-                response += f"• *{user_sym}* ({sym}): {price_str}\n"
-
-            # Active Target Alerts
-            if targets:
-                response += "\n🎯 *Active Target Price Alerts:*\n"
-                for t in targets:
-                    sym = t["symbol"]
-                    user_sym = next((w["user_symbol"] for w in watched if w["symbol"] == sym), sym)
-                    response += f"• *{user_sym}*: {t['condition']} {format_price(t['target_price'])}\n"
-            else:
-                response += "\n🎯 *Active Target Price Alerts:* None\n"
-
-            # Active Step Alerts
-            if steps:
-                response += "\n⚡ *Active Step Price Alerts:*\n"
-                for s in steps:
-                    sym = s["symbol"]
-                    user_sym = next((w["user_symbol"] for w in watched if w["symbol"] == sym), sym)
-                    response += f"• *{user_sym}*: Interval {format_price(s['step_interval'])}, Baseline {format_price(s['baseline_price'])}\n"
-            else:
-                response += "\n⚡ *Active Step Price Alerts:* None\n"
-
-            await msg.reply_text(response, parse_mode="Markdown")
-
-        elif cmd_type == "help":
-            help_text = (
-                "ℹ️ <b>Telegram Crypto Alert Bot - Commands List</b>\n\n"
-                "You can configure and interact with the bot using the following commands:\n\n"
-                "1️⃣ <b>Watch List</b>\n"
-                "Set the list of coins to monitor (overwrites existing list):\n"
-                "<code>/watch XRP, ADA, UBUSDT, BTC</code>\n"
-                "<i>(Alternative: <code>CONFIG WATCH XRP, ADA, UBUSDT, BTC</code>)</i>\n\n"
-                "2️⃣ <b>Set Target Alert</b>\n"
-                "Set a target price notification alert:\n"
-                "<code>/set_target BTC 65000 ABOVE</code> or <code>/set_target BTC 65000 BELOW</code>\n"
-                "<i>(Omit ABOVE/BELOW to auto-detect based on current price)</i>\n"
-                "<i>(Alternative: <code>CONFIG TARGET BTC 65000</code>)</i>\n\n"
-                "3️⃣ <b>Set Step Alert</b>\n"
-                "Set a recurring alert every time the price changes by the step amount:\n"
-                "<code>/set_step BTC 500</code>\n"
-                "<i>(Alternative: <code>CONFIG STEP BTC 500</code>)</i>\n\n"
-                "4️⃣ <b>Remove Step Alert</b>\n"
-                "Disable step tracking for a specific coin:\n"
-                "<code>/remove_step BTC</code>\n"
-                "<i>(Alternative: <code>CONFIG REMOVE_STEP BTC</code>)</i>\n\n"
-                "5️⃣ <b>Remove Target Alert</b>\n"
-                "Disable all active target price alerts for a specific coin:\n"
-                "<code>/remove_target BTC</code>\n"
-                "<i>(Alternative: <code>CONFIG REMOVE_TARGET BTC</code>)</i>\n\n"
-                "6️⃣ <b>Check Status</b>\n"
-                "Show active targets, step configurations, and current prices:\n"
-                "<code>/status</code>\n"
-                "<i>(Alternative: <code>CONFIG STATUS</code>)</i>\n\n"
-                "7️⃣ <b>Help Instructions</b>\n"
-                "Display this help message:\n"
-                "<code>/help</code> or <code>/start</code>\n"
-                "<i>(Alternative: <code>CONFIG HELP</code>)</i>"
-            )
-            await msg.reply_text(help_text, parse_mode="HTML")
-
-    except Exception as e:
-        logger.error(f"Error handling admin command: {e}", exc_info=True)
-        await msg.reply_text(f"❌ *Error processing command:* {str(e)}", parse_mode="Markdown")
-
 async def price_polling_loop(application: Application):
     """Continuously polls price feeds and alerts the target channel when conditions are met."""
     logger.info("Starting crypto price polling loop...")
+    
+    # Store last prices in memory to detect midpoint crossovers
+    last_prices = {}
+    
+    # Cache for today's daily open prices: symbol -> (date_str, open_price)
+    today_opens = {}
+    
     while True:
         try:
             # 1. Load watched coins
-            watched = database.get_watched_coins()
+            watched = db.get_watched_coins()
             if not watched:
                 await asyncio.sleep(POLL_INTERVAL)
                 continue
@@ -286,9 +78,11 @@ async def price_polling_loop(application: Application):
 
             # 2. Fetch prices
             prices = await price_fetcher.fetch_prices(resolved_symbols)
+            now = datetime.datetime.now(datetime.timezone.utc)
+            current_date_str = now.strftime("%Y-%m-%d")
 
             # 3. Check targets
-            targets = database.get_active_target_alerts()
+            targets = db.get_active_target_alerts()
             for t in targets:
                 symbol = t["symbol"]
                 target_price = t["target_price"]
@@ -307,7 +101,7 @@ async def price_polling_loop(application: Application):
 
                 if triggered:
                     # Update database trigger status before sending message to prevent duplicate alerts
-                    database.mark_target_alert_triggered(alert_id)
+                    db.mark_target_alert_triggered(alert_id)
 
                     user_sym = symbol_to_user.get(symbol, symbol)
                     msg = (
@@ -324,7 +118,7 @@ async def price_polling_loop(application: Application):
                     logger.info(f"Target Alert Triggered: {symbol} is {current_price} (Target: {condition} {target_price})")
 
             # 4. Check step thresholds
-            step_alerts = database.get_step_alerts()
+            step_alerts = db.get_step_alerts()
             for s in step_alerts:
                 symbol = s["symbol"]
                 step_interval = s["step_interval"]
@@ -338,9 +132,8 @@ async def price_polling_loop(application: Application):
                 abs_change = abs(price_change)
 
                 if abs_change >= step_interval:
-                    # Calculate new baseline based on the target step interval.
-                    # This standardizes baseline updates to current price intervals.
-                    database.update_step_baseline(symbol, current_price)
+                    # Calculate new baseline based on the target step interval
+                    db.update_step_baseline(symbol, current_price)
 
                     direction = "📈 Up" if price_change > 0 else "📉 Down"
                     user_sym = symbol_to_user.get(symbol, symbol)
@@ -360,6 +153,89 @@ async def price_polling_loop(application: Application):
                     )
                     logger.info(f"Step Alert Triggered: {symbol} moved by {price_change:+,.4f} (Baseline: {baseline_price} -> {current_price})")
 
+            # 5. Check YTD average alerts (dynamic relative to today's open price starting point)
+            avg_alerts = db.get_active_average_alerts()
+            for alert in avg_alerts:
+                symbol = alert["symbol"]
+                metric_type = alert["metric_type"]
+                last_triggered_at = alert["last_triggered_at"]
+                avg_high_pct = alert["avg_high_pct"]
+                avg_low_pct = alert["avg_low_pct"]
+
+                if symbol not in prices:
+                    continue
+                current_price = prices[symbol]
+
+                # Ensure we have today's open price cached for this symbol
+                cached_data = today_opens.get(symbol)
+                if not cached_data or cached_data[0] != current_date_str:
+                    logger.info(f"Caching today's open price for {symbol}...")
+                    open_price = await kline_service.fetch_today_open_price(symbol)
+                    if open_price is not None:
+                        today_opens[symbol] = (current_date_str, open_price)
+                        logger.info(f"Today's open price cached for {symbol}: {open_price}")
+                    else:
+                        # Skip if open price couldn't be loaded in this iteration
+                        continue
+                
+                open_price = today_opens[symbol][1]
+
+                # Check 1-hour cooldown
+                if last_triggered_at:
+                    try:
+                        last_triggered = datetime.datetime.fromisoformat(last_triggered_at)
+                        if last_triggered.tzinfo is None:
+                            last_triggered = last_triggered.replace(tzinfo=datetime.timezone.utc)
+                        if now - last_triggered < datetime.timedelta(hours=1):
+                            # Cooldown active, skip this alert
+                            continue
+                    except ValueError:
+                        pass
+
+                # Compute dynamic daily target based on open price starting point
+                triggered = False
+                val = 0.0
+                if metric_type == "HIGH":
+                    val = open_price * (1.0 + avg_high_pct)
+                    if current_price >= val:
+                        triggered = True
+                elif metric_type == "LOW":
+                    val = open_price * (1.0 - avg_low_pct)
+                    if current_price <= val:
+                        triggered = True
+                elif metric_type == "MIDPOINT":
+                    val = open_price * (1.0 + (avg_high_pct - avg_low_pct) / 2.0)
+                    last_price = last_prices.get(symbol)
+                    if last_price is not None:
+                        # Check crossover crossing the midpoint average line
+                        if (last_price < val <= current_price) or (last_price > val >= current_price):
+                            triggered = True
+
+                if triggered:
+                    # Update triggered timestamp immediately before sending to avoid race conditions
+                    db.update_average_alert_triggered(symbol, metric_type)
+
+                    user_sym = symbol_to_user.get(symbol, symbol)
+                    msg = (
+                        f"🚨 *Crypto YTD Average Alert* 🚨\n\n"
+                        f"Asset: *{user_sym}* ({symbol})\n"
+                        f"Metric Triggered: *{metric_type}* Average Crossed/Reached\n"
+                        f"Today's Start (Open): *{format_price(open_price)}*\n"
+                        f"Today's Expected Target: *{format_price(val)}*\n"
+                        f"Current Price: *{format_price(current_price)}*\n"
+                        f"Cooldown: 1-hour initiated."
+                    )
+                    await application.bot.send_message(
+                        chat_id=TARGET_CHAT_ID,
+                        text=msg,
+                        parse_mode="Markdown"
+                    )
+                    logger.info(f"Average Alert Triggered: {symbol} {metric_type} (Price: {current_price}, Open: {open_price}, Target: {val})")
+
+            # Update last prices cache in memory
+            for sym, price in prices.items():
+                last_prices[sym] = price
+
         except Exception as e:
             logger.error(f"Error in price polling loop: {e}", exc_info=True)
 
@@ -367,18 +243,28 @@ async def price_polling_loop(application: Application):
 
 async def post_init(application: Application):
     """Runs after application is initialized to start background tasks."""
+    # 1. Initialize daily_klines and average_metrics for watched coins on startup
+    logger.info("Performing historical data catch-up check for all watched coins...")
+    watched = db.get_watched_coins()
+    for coin in watched:
+        asyncio.create_task(kline_service.catch_up_historical_klines(coin["symbol"]))
+    
+    # 2. Start automated daily update scheduler
+    kline_service.start_midnight_scheduler(db.get_watched_coins)
+    
+    # 3. Start price poller
     asyncio.create_task(price_polling_loop(application))
 
 def main():
     # Initialize local SQLite DB
-    database.init_db()
+    db.init_db()
     logger.info("Local SQLite database initialized.")
 
     # Initialize Telegram Bot Application
     application = Application.builder().token(TELEGRAM_BOT_TOKEN).post_init(post_init).build()
 
     # Register admin message handler for both direct messages and channel posts
-    application.add_handler(MessageHandler(filters.TEXT, handle_admin_message))
+    application.add_handler(MessageHandler(filters.TEXT, bot.handle_admin_message))
 
     # Start Polling for commands
     logger.info("Crypto Alert Bot started polling for commands...")

@@ -112,11 +112,46 @@ def parse_message_command(text: str) -> Optional[Dict[str, Any]]:
         }
 
     # 5. Status Check Command
-    # Matches: /status or CONFIG STATUS
-    if re.search(r"^(?:/status|CONFIG\s+STATUS)$", text, re.IGNORECASE):
-        return {"type": "status"}
+    # Matches: /status [SYMBOL] or CONFIG STATUS [SYMBOL] (optional SYMBOL)
+    status_match = re.search(r"^(?:/status|CONFIG\s+STATUS)(?:\s+(\S+))?$", text, re.IGNORECASE)
+    if status_match:
+        symbol = status_match.group(1)
+        if symbol:
+            symbol = symbol.upper()
+        return {"type": "status", "symbol": symbol}
 
-    # 6. Help / Start Command
+    # 6. Set Average Alert Command
+    # Matches: /set_avg_alert [SYMBOL] [HIGH|LOW|MIDPOINT] or CONFIG AVG_ALERT [SYMBOL] [HIGH|LOW|MIDPOINT]
+    avg_alert_match = re.search(
+        r"^(?:/set_avg_alert|CONFIG\s+AVG_ALERT)\s+(\S+)\s+(HIGH|LOW|MIDPOINT)$", 
+        text, 
+        re.IGNORECASE
+    )
+    if avg_alert_match:
+        return {
+            "type": "set_avg_alert",
+            "symbol": avg_alert_match.group(1).upper(),
+            "metric_type": avg_alert_match.group(2).upper()
+        }
+
+    # 7. Remove Average Alert Command
+    # Matches: /remove_avg_alert [SYMBOL] [HIGH|LOW|MIDPOINT] or CONFIG REMOVE_AVG_ALERT [SYMBOL] [HIGH|LOW|MIDPOINT]
+    remove_avg_alert_match = re.search(
+        r"^(?:/remove_avg_alert|CONFIG\s+REMOVE_AVG_ALERT)\s+(\S+)(?:\s+(HIGH|LOW|MIDPOINT))?$", 
+        text, 
+        re.IGNORECASE
+    )
+    if remove_avg_alert_match:
+        metric = remove_avg_alert_match.group(2)
+        if metric:
+            metric = metric.upper()
+        return {
+            "type": "remove_avg_alert",
+            "symbol": remove_avg_alert_match.group(1).upper(),
+            "metric_type": metric
+        }
+
+    # 8. Help / Start Command
     # Matches: /help, /start or CONFIG HELP
     if re.search(r"^(?:/help|/start|CONFIG\s+HELP)$", text, re.IGNORECASE):
         return {"type": "help"}
