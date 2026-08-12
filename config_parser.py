@@ -151,7 +151,35 @@ def parse_message_command(text: str) -> Optional[Dict[str, Any]]:
             "metric_type": metric
         }
 
-    # 8. Help / Start Command
+    # 8. Gainers Command
+    # Matches: /gainers [MIN_PERCENT] or CONFIG GAINERS [MIN_PERCENT]
+    gainers_match = re.search(r"^(?:/gainers|CONFIG\s+GAINERS)(?:\s+(\d+(?:\.\d+)?))?$", text, re.IGNORECASE)
+    if gainers_match:
+        min_pct = gainers_match.group(1)
+        return {
+            "type": "gainers",
+            "min_percent": float(min_pct) if min_pct else None
+        }
+
+    # 9. Set Gainer Threshold Command
+    # Matches: /set_gainer_threshold [PERCENT] or CONFIG GAINER_THRESHOLD [PERCENT]
+    threshold_match = re.search(r"^(?:/set_gainer_threshold|CONFIG\s+GAINER_THRESHOLD)\s+(\d+(?:\.\d+)?)$", text, re.IGNORECASE)
+    if threshold_match:
+        return {
+            "type": "set_gainer_threshold",
+            "percent": float(threshold_match.group(1))
+        }
+
+    # 10. Gainer Scanner Toggle Command
+    # Matches: /gainer_scanner [ON|OFF] or CONFIG GAINER_SCANNER [ON|OFF]
+    scanner_match = re.search(r"^(?:/gainer_scanner|CONFIG\s+GAINER_SCANNER)\s+(ON|OFF)$", text, re.IGNORECASE)
+    if scanner_match:
+        return {
+            "type": "gainer_scanner",
+            "status": scanner_match.group(1).upper()
+        }
+
+    # 11. Help / Start Command
     # Matches: /help, /start or CONFIG HELP
     if re.search(r"^(?:/help|/start|CONFIG\s+HELP)$", text, re.IGNORECASE):
         return {"type": "help"}

@@ -10,6 +10,7 @@ from dotenv import load_dotenv
 import db
 import price_fetcher
 import kline_service
+import gainer_service
 import bot
 
 # Configure Logging
@@ -250,7 +251,17 @@ async def post_init(application: Application):
         asyncio.create_task(kline_service.catch_up_historical_klines(coin["symbol"]))
     
     # 2. Start automated daily update scheduler
-    kline_service.start_midnight_scheduler(db.get_watched_coins)
+    scheduler = kline_service.start_midnight_scheduler(db.get_watched_coins)
+    
+    # Register the gainer scanner background job (run every 5 minutes)
+    scheduler.add_job(
+        gainer_service.run_gainer_scanner,
+        "interval",
+        minutes=5,
+        args=[application],
+        name="gainer_scanner"
+    )
+    logger.info("Gainer background scanner scheduled to run every 5 minutes.")
     
     # 3. Start price poller
     asyncio.create_task(price_polling_loop(application))

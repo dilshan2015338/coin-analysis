@@ -107,6 +107,29 @@ def init_db():
                 FOREIGN KEY(symbol) REFERENCES watched_coins(symbol) ON DELETE CASCADE
             );
         """)
+
+        # Create gainer_alerts_history table
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS gainer_alerts_history (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                symbol TEXT NOT NULL,
+                price_change_pct REAL NOT NULL,
+                price_at_alert REAL NOT NULL,
+                alerted_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            );
+        """)
+
+        # Create settings table
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS settings (
+                key TEXT PRIMARY KEY,
+                value TEXT NOT NULL
+            );
+        """)
+        
+        # Insert default settings if they don't exist
+        conn.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('gainer_threshold', '50.0');")
+        conn.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('gainer_scanner_enabled', '1');")
         conn.commit()
 
 # --- Watched Coins Operations ---
@@ -366,3 +389,39 @@ def get_recent_closes(symbol: str, limit: int = 20) -> List[float]:
             (symbol, limit)
         )
         return [row["close"] for row in cursor.fetchall()]
+
+def get_setting(key: str, default: str) -> str:
+    """Gets a configuration setting value from the database settings table."""
+    with get_connection() as conn:
+        cursor = conn.execute("SELECT value FROM settings WHERE key = ?;", (key,))
+        row = cursor.fetchone()
+        return row[0] if row else default
+
+def set_setting(key: str, value: str):
+    """Updates or inserts a configuration setting value in the settings table."""
+    with get_connection() as conn:
+        conn.execute(
+            "INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?);",
+            (key, str(value))
+        )
+        conn.commit()
+
+def get_last_gainer_alert(symbol: str) -> Optional[Dict[str, Any]]:
+    """Retrieves the most recent alert for a symbol from gainer_alerts_history."""
+    with get_connection() as conn:
+        cursor = conn.execute(
+            "SELECT price_change_pct, price_at_alert, alerted_at FROM gainer_alerts_history WHERE symbol = ? ORDER BY alerted_at DESC LIMIT 1;",
+            (symbol,)
+        )
+        row = cursor.fetchone()
+        return dict(row) if row else None
+
+def insert_gainer_alert(symbol: str, price_change_pct: float, price_at_alert: float):
+    """Inserts a new gainer alert record with timezone-aware timestamp string."""
+    now_str = datetime.datetime.now(datetime.timezone.utc).isoformat()
+    with get_connection() as conn:
+        conn.execute(
+            "INSERT INTO gainer_alerts_history (symbol, price_change_pct, price_at_alert, alerted_at) VALUES (?, ?, ?, ?);",
+            (symbol, price_change_pct, price_at_alert, now_str)
+        )
+        conn.commit()

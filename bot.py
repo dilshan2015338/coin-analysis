@@ -7,6 +7,7 @@ from telegram.ext import ContextTypes
 import db
 import price_fetcher
 import kline_service
+import gainer_service
 from config_parser import parse_message_command
 
 logger = logging.getLogger(__name__)
@@ -381,7 +382,70 @@ async def handle_admin_message(update: Update, context: ContextTypes.DEFAULT_TYP
                 else:
                     response += "\n📈 *Active Average Price Alerts:* None\n"
 
+                # 24h Gainer Scanner settings
+                scanner_enabled = db.get_setting("gainer_scanner_enabled", "1")
+                gainer_threshold = db.get_setting("gainer_threshold", "50.0")
+                scanner_status = "ON" if scanner_enabled == "1" else "OFF"
+                
+                response += f"\n📢 *24h Pump Scanner:*\n"
+                response += f"• Status: *{scanner_status}*\n"
+                response += f"• Threshold: *{gainer_threshold}%*\n"
+
                 await msg.reply_text(response, parse_mode="Markdown")
+
+        elif cmd_type == "gainers":
+            min_percent = command.get("min_percent")
+            if min_percent is None:
+                try:
+                    min_percent = float(db.get_setting("gainer_threshold", "50.0"))
+                except ValueError:
+                    min_percent = 50.0
+                    
+            await msg.reply_text(f"⏳ Querying Binance 24h market stats for pairs >={min_percent}% gain...")
+            
+            tickers = await gainer_service.fetch_24h_tickers()
+            if not tickers:
+                await msg.reply_text("❌ Failed to fetch market stats from Binance.")
+                return
+
+            gainers = gainer_service.filter_gainers(tickers, min_percent)
+            if not gainers:
+                await msg.reply_text(f"No USDT trading pairs met the >={min_percent}% gain criteria.")
+                return
+
+            # Display top 15
+            top_gainers = gainers[:15]
+            response = f"🚀 *24-Hour Top Gainers (>={min_percent}%)*\n\n"
+            for g in top_gainers:
+                sym = g["symbol"]
+                change = g["priceChangePercent"]
+                price = g["lastPrice"]
+                vol = g["quoteVolume"]
+                response += f"• *{sym}*: +{change:.1f}% | Price: {gainer_service.format_price(price)} | Vol: {gainer_service.format_volume(vol)}\n"
+                
+            if len(gainers) > 15:
+                response += f"\n_(showing top 15 out of {len(gainers)} total gainers above {min_percent}%)_"
+                
+            await msg.reply_text(response, parse_mode="Markdown")
+
+        elif cmd_type == "set_gainer_threshold":
+            percent = command["percent"]
+            db.set_setting("gainer_threshold", str(percent))
+            response = (
+                f"✅ *Gainer Alert Threshold Updated!*\n\n"
+                f"Automatic scanner will now trigger for assets gaining *>{percent}%* in 24 hours."
+            )
+            await msg.reply_text(response, parse_mode="Markdown")
+
+        elif cmd_type == "gainer_scanner":
+            status = command["status"]
+            val = "1" if status == "ON" else "0"
+            db.set_setting("gainer_scanner_enabled", val)
+            response = (
+                f"✅ *Gainer Background Scanner Updated!*\n\n"
+                f"Automatic scanning and notifications are now *{status}*."
+            )
+            await msg.reply_text(response, parse_mode="Markdown")
 
         elif cmd_type == "help":
             help_text = (
@@ -420,7 +484,14 @@ async def handle_admin_message(update: Update, context: ContextTypes.DEFAULT_TYP
                 "Show active targets, step configurations, average alerts and current prices:\n"
                 "<code>/status</code> or <code>/status BTC</code>\n"
                 "<i>(Alternative: <code>CONFIG STATUS BTC</code>)</i>\n\n"
-                "9️⃣ <b>Help Instructions</b>\n"
+                "9️⃣ <b>24h Gainer Scanner Settings</b>\n"
+                "Get current top gainers list:\n"
+                "<code>/gainers</code> or <code>/gainers 30</code>\n"
+                "Set automatic alert threshold percentage:\n"
+                "<code>/set_gainer_threshold 40</code>\n"
+                "Toggle background scanner ON or OFF:\n"
+                "<code>/gainer_scanner ON</code> or <code>/gainer_scanner OFF</code>\n\n"
+                "🔟 <b>Help Instructions</b>\n"
                 "Display this help message:\n"
                 "<code>/help</code> or <code>/start</code>\n"
                 "<i>(Alternative: <code>CONFIG HELP</code>)</i>"
