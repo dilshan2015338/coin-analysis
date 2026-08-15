@@ -1,4 +1,9 @@
 import os
+from dotenv import load_dotenv
+
+# Load environment variables
+load_dotenv()
+
 import logging
 from typing import Any
 from telegram import Update

@@ -1,4 +1,9 @@
 import os
+from dotenv import load_dotenv
+
+# Load environment variables
+load_dotenv()
+
 import httpx
 import logging
 import datetime
@@ -195,3 +200,30 @@ async def run_gainer_scanner(application: Any):
                 logger.info(f"Sent 24h pump alert to Telegram for {symbol} (+{current_pct:.1f}%)")
             except Exception as e:
                 logger.error(f"Failed to send pump alert for {symbol} to Telegram: {e}")
+
+            # 5. Run Mean Reversion Short Analyst signal evaluation
+            try:
+                import analyst_service
+                eval_data = {
+                    "symbol": symbol,
+                    "priceChangePercent": current_pct,
+                    "lastPrice": current_price,
+                    "highPrice": high_24h,
+                    "lowPrice": low_24h,
+                    "quoteVolume": volume_24h
+                }
+                eval_result = await analyst_service.evaluate_gainer(eval_data)
+                decision = eval_result.get("decision", "NO_TRADE")
+                logger.info(f"Analyst evaluation for {symbol}: decision={decision}, confidence={eval_result.get('confidence_score')}%")
+                
+                if decision == "ENTER_SHORT":
+                    short_alert_msg = eval_result.get("telegram_alert")
+                    if short_alert_msg:
+                        await application.bot.send_message(
+                            chat_id=TARGET_CHAT_ID,
+                            text=short_alert_msg,
+                            parse_mode="Markdown"
+                        )
+                        logger.info(f"Dispatched trade short signal alert for {symbol} to Telegram.")
+            except Exception as ae:
+                logger.error(f"Failed to run short analyst evaluation or send alert for {symbol}: {ae}", exc_info=True)

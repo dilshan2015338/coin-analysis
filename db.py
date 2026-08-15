@@ -1,5 +1,10 @@
 import sqlite3
 import os
+from dotenv import load_dotenv
+
+# Load environment variables
+load_dotenv()
+
 import datetime
 import logging
 from typing import List, Tuple, Dict, Any, Optional

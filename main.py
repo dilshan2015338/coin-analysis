@@ -7,6 +7,9 @@ from telegram import Update
 from telegram.ext import Application, MessageHandler, filters, ContextTypes
 from dotenv import load_dotenv
 
+# Load Environment Variables first so all subsequent imports have access to config
+load_dotenv()
+
 import db
 import price_fetcher
 import kline_service
@@ -20,8 +23,6 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# Load Environment Variables
-load_dotenv()
 
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 ADMIN_CHAT_ID_RAW = os.getenv("ADMIN_CHAT_ID")

@@ -35,20 +35,33 @@ async def fetch_ticker_data(client: httpx.AsyncClient, url: str) -> List[Dict[st
 async def fetch_prices(resolved_symbols: List[str]) -> Dict[str, float]:
     """
     Fetches the current price for a list of resolved symbols.
-    Queries only the Binance Futures endpoint.
+    Queries both Binance Spot and Futures endpoints concurrently to resolve both types of assets.
     Returns a dictionary of symbol -> price.
     """
     if not resolved_symbols:
         return {}
 
     futures_url = "https://fapi.binance.com/fapi/v1/ticker/price"
+    spot_url = "https://api.binance.com/api/v3/ticker/price"
 
     async with httpx.AsyncClient() as client:
-        futures_data = await fetch_ticker_data(client, futures_url)
+        futures_task = fetch_ticker_data(client, futures_url)
+        spot_task = fetch_ticker_data(client, spot_url)
+        futures_data, spot_data = await asyncio.gather(futures_task, spot_task)
 
     price_map: Dict[str, float] = {}
 
-    # Process Futures data
+    # Process Spot data first
+    for item in spot_data:
+        sym = item.get("symbol")
+        val = item.get("price")
+        if sym and val:
+            try:
+                price_map[sym] = float(val)
+            except ValueError:
+                pass
+
+    # Process Futures data (prioritize futures prices if there is overlap/hedging)
     for item in futures_data:
         sym = item.get("symbol")
         val = item.get("price")
@@ -64,6 +77,6 @@ async def fetch_prices(resolved_symbols: List[str]) -> Dict[str, float]:
         if sym in price_map:
             result[sym] = price_map[sym]
         else:
-            logger.warning(f"Price for symbol {sym} could not be found on Binance Futures.")
+            logger.warning(f"Price for symbol {sym} could not be found on Binance Spot or Futures.")
 
     return result
