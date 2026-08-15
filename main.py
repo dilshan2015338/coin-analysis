@@ -8,7 +8,7 @@ from telegram.ext import Application, MessageHandler, filters, ContextTypes
 from dotenv import load_dotenv
 
 # Load Environment Variables first so all subsequent imports have access to config
-load_dotenv()
+load_dotenv(dotenv_path=os.path.join(os.path.dirname(os.path.abspath(__file__)), '.env'))
 
 import db
 import price_fetcher
