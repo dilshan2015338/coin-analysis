@@ -398,6 +398,56 @@ async def handle_admin_message(update: Update, context: ContextTypes.DEFAULT_TYP
 
                 await msg.reply_text(response, parse_mode="Markdown")
 
+        elif cmd_type == "short_status":
+            import httpx
+            import analyst_service
+            user_symbol = command["symbol"]
+            resolved = price_fetcher.resolve_symbol(user_symbol)
+            
+            # Fetch price to verify symbol validity
+            prices = await price_fetcher.fetch_prices([resolved])
+            if resolved not in prices:
+                await msg.reply_text(f"❌ Could not find price for *{user_symbol}* on Binance.", parse_mode="Markdown")
+                return
+            
+            status_msg = await msg.reply_text(f"⏳ Querying data and evaluating short reversion signal for *{user_symbol}* ({resolved})...", parse_mode="Markdown")
+            
+            try:
+                ticker_24h = {}
+                async with httpx.AsyncClient() as client:
+                    resp = await client.get(f"https://api.binance.com/api/v3/ticker/24hr?symbol={resolved}", timeout=10.0)
+                    if resp.status_code == 200:
+                        t_data = resp.json()
+                        ticker_24h = {
+                            "symbol": resolved,
+                            "priceChangePercent": float(t_data.get("priceChangePercent", 0.0)),
+                            "lastPrice": float(t_data.get("lastPrice", 0.0)),
+                            "highPrice": float(t_data.get("highPrice", 0.0)),
+                            "lowPrice": float(t_data.get("lowPrice", 0.0)),
+                            "quoteVolume": float(t_data.get("quoteVolume", 0.0))
+                        }
+                
+                if not ticker_24h:
+                    current_price = prices[resolved]
+                    ticker_24h = {
+                        "symbol": resolved,
+                        "priceChangePercent": 0.0,
+                        "lastPrice": current_price,
+                        "highPrice": current_price,
+                        "lowPrice": current_price,
+                        "quoteVolume": 0.0
+                    }
+                    
+                eval_result = await analyst_service.evaluate_gainer(ticker_24h)
+                alert_text = eval_result.get("telegram_alert")
+                if alert_text:
+                    await status_msg.edit_text(alert_text, parse_mode="Markdown")
+                else:
+                    await status_msg.edit_text(f"❌ Evaluation returned empty alert for *{user_symbol}*.", parse_mode="Markdown")
+            except Exception as e:
+                logger.error(f"Error evaluating {resolved} on short_status command: {e}", exc_info=True)
+                await status_msg.edit_text(f"❌ Error during evaluation of *{user_symbol}*: {str(e)}", parse_mode="Markdown")
+
         elif cmd_type == "gainers":
             min_percent = command.get("min_percent")
             if min_percent is None:
@@ -489,14 +539,18 @@ async def handle_admin_message(update: Update, context: ContextTypes.DEFAULT_TYP
                 "Show active targets, step configurations, average alerts and current prices:\n"
                 "<code>/status</code> or <code>/status BTC</code>\n"
                 "<i>(Alternative: <code>CONFIG STATUS BTC</code>)</i>\n\n"
-                "9️⃣ <b>24h Gainer Scanner Settings</b>\n"
+                "9️⃣ <b>Short Reversion Signal Evaluation</b>\n"
+                "Evaluate confluences and get entry/exit short signals on demand:\n"
+                "<code>/short_status BTC</code> or <code>/evaluate ETH</code>\n"
+                "<i>(Alternative: <code>CONFIG SHORT_STATUS BTC</code>)</i>\n\n"
+                "1️⃣0️⃣ <b>24h Gainer Scanner Settings</b>\n"
                 "Get current top gainers list:\n"
                 "<code>/gainers</code> or <code>/gainers 30</code>\n"
                 "Set automatic alert threshold percentage:\n"
                 "<code>/set_gainer_threshold 40</code>\n"
                 "Toggle background scanner ON or OFF:\n"
                 "<code>/gainer_scanner ON</code> or <code>/gainer_scanner OFF</code>\n\n"
-                "🔟 <b>Help Instructions</b>\n"
+                "1️⃣1️⃣ <b>Help Instructions</b>\n"
                 "Display this help message:\n"
                 "<code>/help</code> or <code>/start</code>\n"
                 "<i>(Alternative: <code>CONFIG HELP</code>)</i>"

@@ -120,6 +120,18 @@ def parse_message_command(text: str) -> Optional[Dict[str, Any]]:
             symbol = symbol.upper()
         return {"type": "status", "symbol": symbol}
 
+    # Matches: /short_status SYMBOL or /evaluate SYMBOL or CONFIG SHORT_STATUS SYMBOL or CONFIG EVALUATE SYMBOL
+    short_status_match = re.search(
+        r"^(?:/short_status|/evaluate|CONFIG\s+(?:SHORT_STATUS|EVALUATE))\s+(\S+)$", 
+        text, 
+        re.IGNORECASE
+    )
+    if short_status_match:
+        return {
+            "type": "short_status",
+            "symbol": short_status_match.group(1).upper()
+        }
+
     # 6. Set Average Alert Command
     # Matches: /set_avg_alert [SYMBOL] [HIGH|LOW|MIDPOINT] or CONFIG AVG_ALERT [SYMBOL] [HIGH|LOW|MIDPOINT]
     avg_alert_match = re.search(
