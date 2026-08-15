@@ -485,6 +485,8 @@ def generate_mock_decision(payload: dict) -> dict:
         f"• *Risk Reward*: {risk_reward}\n\n"
         f"🔍 *Confluences*:\n" + "\n".join([f"  - {r}" for r in reasons])
     )
+    # Escape underscores to prevent Telegram Markdown parsing entities error
+    alert = alert.replace('_', '\\_')
 
     return {
         "symbol": symbol,
@@ -556,7 +558,11 @@ async def evaluate_gainer(ticker_data: dict) -> dict:
                 if lines[0].startswith("```json") or lines[0].startswith("```"):
                     raw_text = "\n".join(lines[1:-1]).strip()
                     
-            return json.loads(raw_text)
+            result = json.loads(raw_text)
+            if "telegram_alert" in result and isinstance(result["telegram_alert"], str):
+                # Escape underscores to prevent Telegram Markdown parsing entities error
+                result["telegram_alert"] = result["telegram_alert"].replace('_', '\\_')
+            return result
             
     except Exception as e:
         logger.error(f"Error evaluating gainer {symbol} with agent: {e}", exc_info=True)
@@ -576,5 +582,5 @@ async def evaluate_gainer(ticker_data: dict) -> dict:
                     "take_profit_targets": [0, 0, 0],
                     "risk_reward_ratio": "1:0"
                 },
-                "telegram_alert": f"⚠️ Error evaluating {symbol}: {str(e)}"
+                "telegram_alert": f"⚠️ Error evaluating {symbol}: {str(e)}".replace('_', '\\_')
             }
