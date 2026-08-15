@@ -132,6 +132,23 @@ def init_db():
             );
         """)
         
+        # Create recurring_updates table
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS recurring_updates (
+                symbol TEXT PRIMARY KEY,
+                interval_minutes INTEGER NOT NULL,
+                last_pushed_at TIMESTAMP,
+                last_price REAL,
+                FOREIGN KEY(symbol) REFERENCES watched_coins(symbol) ON DELETE CASCADE
+            );
+        """)
+        
+        # Migrate recurring_updates if last_price is missing
+        try:
+            conn.execute("ALTER TABLE recurring_updates ADD COLUMN last_price REAL;")
+        except sqlite3.OperationalError:
+            pass
+
         # Insert default settings if they don't exist
         conn.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('gainer_threshold', '50.0');")
         conn.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('gainer_scanner_enabled', '1');")
@@ -429,4 +446,40 @@ def insert_gainer_alert(symbol: str, price_change_pct: float, price_at_alert: fl
             "INSERT INTO gainer_alerts_history (symbol, price_change_pct, price_at_alert, alerted_at) VALUES (?, ?, ?, ?);",
             (symbol, price_change_pct, price_at_alert, now_str)
         )
+        conn.commit()
+
+# --- Recurring Updates Operations ---
+
+def set_recurring_update(symbol: str, interval_minutes: int):
+    """Inserts or updates a recurring price update configuration for a symbol."""
+    with get_connection() as conn:
+        conn.execute(
+            """
+            INSERT OR REPLACE INTO recurring_updates (symbol, interval_minutes, last_pushed_at, last_price)
+            VALUES (?, ?, NULL, NULL);
+            """,
+            (symbol, interval_minutes)
+        )
+        conn.commit()
+
+def get_recurring_updates() -> List[Dict[str, Any]]:
+    """Returns all configured recurring updates."""
+    with get_connection() as conn:
+        cursor = conn.execute("SELECT symbol, interval_minutes, last_pushed_at, last_price FROM recurring_updates;")
+        return [dict(row) for row in cursor.fetchall()]
+
+def update_recurring_update_last_pushed(symbol: str, price: float):
+    """Updates the last pushed timestamp and price for a recurring update."""
+    now_str = datetime.datetime.now(datetime.timezone.utc).isoformat()
+    with get_connection() as conn:
+        conn.execute(
+            "UPDATE recurring_updates SET last_pushed_at = ?, last_price = ? WHERE symbol = ?;",
+            (now_str, price, symbol)
+        )
+        conn.commit()
+
+def remove_recurring_update(symbol: str):
+    """Removes a recurring update configuration for a symbol."""
+    with get_connection() as conn:
+        conn.execute("DELETE FROM recurring_updates WHERE symbol = ?;", (symbol,))
         conn.commit()

@@ -234,6 +234,58 @@ async def price_polling_loop(application: Application):
                     )
                     logger.info(f"Average Alert Triggered: {symbol} {metric_type} (Price: {current_price}, Open: {open_price}, Target: {val})")
 
+            # 6. Check recurring price updates
+            recurring_updates = db.get_recurring_updates()
+            for r in recurring_updates:
+                symbol = r["symbol"]
+                interval_minutes = r["interval_minutes"]
+                last_pushed_at = r["last_pushed_at"]
+
+                if symbol not in prices:
+                    continue
+                current_price = prices[symbol]
+
+                triggered = False
+                if not last_pushed_at:
+                    triggered = True
+                else:
+                    try:
+                        last_pushed = datetime.datetime.fromisoformat(last_pushed_at)
+                        if last_pushed.tzinfo is None:
+                            last_pushed = last_pushed.replace(tzinfo=datetime.timezone.utc)
+                        if now - last_pushed >= datetime.timedelta(minutes=interval_minutes):
+                            triggered = True
+                    except ValueError:
+                        triggered = True
+
+                if triggered:
+                    # Update database with current price and last pushed time
+                    db.update_recurring_update_last_pushed(symbol, current_price)
+                    user_sym = symbol_to_user.get(symbol, symbol)
+                    
+                    prev_price = r["last_price"]
+                    if prev_price is not None and prev_price > 0:
+                        price_change = current_price - prev_price
+                        change_pct = (price_change / prev_price) * 100.0
+                        direction = "📈" if price_change >= 0 else "📉"
+                        comparison_str = f"Previous Price: *{format_price(prev_price)}* ({direction} {change_pct:+.2f}%)\n"
+                    else:
+                        comparison_str = "Previous Price: *N/A*\n"
+
+                    msg = (
+                        f"⏰ *Crypto Price Update* ⏰\n\n"
+                        f"Asset: *{user_sym}* ({symbol})\n"
+                        f"Current Price: *{format_price(current_price)}*\n"
+                        f"{comparison_str}"
+                        f"Interval: Every *{interval_minutes}* min\n"
+                    )
+                    await application.bot.send_message(
+                        chat_id=TARGET_CHAT_ID,
+                        text=msg,
+                        parse_mode="Markdown"
+                    )
+                    logger.info(f"Recurring Price Push Triggered: {symbol} is {current_price} (Interval: {interval_minutes} min, Prev: {prev_price})")
+
             # Update last prices cache in memory
             for sym, price in prices.items():
                 last_prices[sym] = price

@@ -191,7 +191,34 @@ def parse_message_command(text: str) -> Optional[Dict[str, Any]]:
             "status": scanner_match.group(1).upper()
         }
 
-    # 11. Help / Start Command
+    # 11. Set Recurring Update Command
+    # Matches: /set_update BTC 2 or CONFIG UPDATE BTC 2
+    update_match = re.search(
+        r"^(?:/set_update|CONFIG\s+UPDATE)\s+(\S+)\s+(\d+)$", 
+        text, 
+        re.IGNORECASE
+    )
+    if update_match:
+        return {
+            "type": "set_update",
+            "symbol": update_match.group(1).upper(),
+            "interval_minutes": int(update_match.group(2))
+        }
+
+    # 12. Remove Recurring Update Command
+    # Matches: /remove_update BTC or /clear_update BTC or CONFIG REMOVE_UPDATE BTC
+    remove_update_match = re.search(
+        r"^(?:/remove_update|/clear_update|CONFIG\s+(?:REMOVE_UPDATE|CLEAR_UPDATE))\s+(\S+)$",
+        text,
+        re.IGNORECASE
+    )
+    if remove_update_match:
+        return {
+            "type": "remove_update",
+            "symbol": remove_update_match.group(1).upper()
+        }
+
+    # 13. Help / Start Command
     # Matches: /help, /start or CONFIG HELP
     if re.search(r"^(?:/help|/start|CONFIG\s+HELP)$", text, re.IGNORECASE):
         return {"type": "help"}

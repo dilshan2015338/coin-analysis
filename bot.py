@@ -255,6 +255,44 @@ async def handle_admin_message(update: Update, context: ContextTypes.DEFAULT_TYP
                 )
             await msg.reply_text(response, parse_mode="Markdown")
 
+        elif cmd_type == "set_update":
+            user_symbol = command["symbol"]
+            interval_minutes = command["interval_minutes"]
+            resolved = price_fetcher.resolve_symbol(user_symbol)
+
+            prices = await price_fetcher.fetch_prices([resolved])
+            if resolved not in prices:
+                await msg.reply_text(f"❌ Could not find price for *{user_symbol}* on Binance.", parse_mode="Markdown")
+                return
+
+            # Auto-watch if not watched
+            watched = db.get_watched_coins()
+            if not any(w["symbol"] == resolved for w in watched):
+                new_watched = [(w["symbol"], w["user_symbol"]) for w in watched]
+                new_watched.append((resolved, user_symbol))
+                db.update_watched_coins(new_watched)
+                asyncio.create_task(kline_service.catch_up_historical_klines(resolved))
+
+            db.set_recurring_update(resolved, interval_minutes)
+
+            response = (
+                f"✅ *Recurring Price Update Configured!*\n\n"
+                f"Asset: *{user_symbol}* ({resolved})\n"
+                f"Interval: Every *{interval_minutes}* minutes\n"
+                f"Updates will be posted automatically."
+            )
+            await msg.reply_text(response, parse_mode="Markdown")
+
+        elif cmd_type == "remove_update":
+            user_symbol = command["symbol"]
+            resolved = price_fetcher.resolve_symbol(user_symbol)
+            db.remove_recurring_update(resolved)
+            response = (
+                f"✅ *Recurring Price Update Removed!*\n\n"
+                f"Removed recurring update schedule for *{user_symbol}* ({resolved})."
+            )
+            await msg.reply_text(response, parse_mode="Markdown")
+
         elif cmd_type == "status":
             symbol = command.get("symbol")
             if symbol:
@@ -386,6 +424,17 @@ async def handle_admin_message(update: Update, context: ContextTypes.DEFAULT_TYP
                             response += f"• *{user_sym}*: {metric_type}\n"
                 else:
                     response += "\n📈 *Active Average Price Alerts:* None\n"
+
+                # Active Recurring Updates
+                recurring_updates = db.get_recurring_updates()
+                if recurring_updates:
+                    response += "\n⏰ *Active Recurring Price Updates:*\n"
+                    for r in recurring_updates:
+                        sym = r["symbol"]
+                        user_sym = next((w["user_symbol"] for w in watched if w["symbol"] == sym), sym)
+                        response += f"• *{user_sym}*: Every {r['interval_minutes']} min\n"
+                else:
+                    response += "\n⏰ *Active Recurring Price Updates:* None\n"
 
                 # 24h Gainer Scanner settings
                 scanner_enabled = db.get_setting("gainer_scanner_enabled", "1")
@@ -523,34 +572,42 @@ async def handle_admin_message(update: Update, context: ContextTypes.DEFAULT_TYP
                 "Set alert for crossing YTD average high/low/midpoint metrics:\n"
                 "<code>/set_avg_alert BTC HIGH</code> or <code>/set_avg_alert BTC MIDPOINT</code>\n"
                 "<i>(Alternative: <code>CONFIG AVG_ALERT BTC LOW</code>)</i>\n\n"
-                "5️⃣ <b>Remove Step Alert</b>\n"
+                "5️⃣ <b>Set Recurring Update Alert</b>\n"
+                "Set a recurring price update to be posted at intervals (in minutes):\n"
+                "<code>/set_update BTC 2</code> or <code>/set_update BTC 5</code>\n"
+                "<i>(Alternative: <code>CONFIG UPDATE BTC 2</code>)</i>\n\n"
+                "6️⃣ <b>Remove Step Alert</b>\n"
                 "Disable step tracking for a specific coin:\n"
                 "<code>/remove_step BTC</code>\n"
                 "<i>(Alternative: <code>CONFIG REMOVE_STEP BTC</code>)</i>\n\n"
-                "6️⃣ <b>Remove Target Alert</b>\n"
+                "7️⃣ <b>Remove Target Alert</b>\n"
                 "Disable all active target price alerts for a specific coin:\n"
                 "<code>/remove_target BTC</code>\n"
                 "<i>(Alternative: <code>CONFIG REMOVE_TARGET BTC</code>)</i>\n\n"
-                "7️⃣ <b>Remove Average Alert</b>\n"
+                "8️⃣ <b>Remove Average Alert</b>\n"
                 "Disable average price alerts for a specific coin:\n"
                 "<code>/remove_avg_alert BTC HIGH</code> or <code>/remove_avg_alert BTC</code>\n"
                 "<i>(Alternative: <code>CONFIG REMOVE_AVG_ALERT BTC LOW</code>)</i>\n\n"
-                "8️⃣ <b>Check Status</b>\n"
+                "9️⃣ <b>Remove Recurring Update Alert</b>\n"
+                "Disable recurring price updates for a specific coin:\n"
+                "<code>/remove_update BTC</code>\n"
+                "<i>(Alternative: <code>CONFIG REMOVE_UPDATE BTC</code>)</i>\n\n"
+                "1️⃣0️⃣ <b>Check Status</b>\n"
                 "Show active targets, step configurations, average alerts and current prices:\n"
                 "<code>/status</code> or <code>/status BTC</code>\n"
                 "<i>(Alternative: <code>CONFIG STATUS BTC</code>)</i>\n\n"
-                "9️⃣ <b>Short Reversion Signal Evaluation</b>\n"
+                "1️⃣1️⃣ <b>Short Reversion Signal Evaluation</b>\n"
                 "Evaluate confluences and get entry/exit short signals on demand:\n"
                 "<code>/short_status BTC</code> or <code>/evaluate ETH</code>\n"
                 "<i>(Alternative: <code>CONFIG SHORT_STATUS BTC</code>)</i>\n\n"
-                "1️⃣0️⃣ <b>24h Gainer Scanner Settings</b>\n"
+                "1️⃣2️⃣ <b>24h Gainer Scanner Settings</b>\n"
                 "Get current top gainers list:\n"
                 "<code>/gainers</code> or <code>/gainers 30</code>\n"
                 "Set automatic alert threshold percentage:\n"
                 "<code>/set_gainer_threshold 40</code>\n"
                 "Toggle background scanner ON or OFF:\n"
                 "<code>/gainer_scanner ON</code> or <code>/gainer_scanner OFF</code>\n\n"
-                "1️⃣1️⃣ <b>Help Instructions</b>\n"
+                "1️⃣3️⃣ <b>Help Instructions</b>\n"
                 "Display this help message:\n"
                 "<code>/help</code> or <code>/start</code>\n"
                 "<i>(Alternative: <code>CONFIG HELP</code>)</i>"
