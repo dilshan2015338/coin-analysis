@@ -218,7 +218,20 @@ def parse_message_command(text: str) -> Optional[Dict[str, Any]]:
             "symbol": remove_update_match.group(1).upper()
         }
 
-    # 13. Help / Start Command
+    # 13. Market Analyzer Command
+    # Matches: /analyze BTC, /analysis BTC, CONFIG ANALYZE BTC, CONFIG ANALYSIS BTC
+    analyze_match = re.search(
+        r"^(?:/analyze|/analysis|CONFIG\s+(?:ANALYZE|ANALYSIS))\s+(\S+)$",
+        text,
+        re.IGNORECASE
+    )
+    if analyze_match:
+        return {
+            "type": "analyze",
+            "symbol": analyze_match.group(1).upper()
+        }
+
+    # 14. Help / Start Command
     # Matches: /help, /start or CONFIG HELP
     if re.search(r"^(?:/help|/start|CONFIG\s+HELP)$", text, re.IGNORECASE):
         return {"type": "help"}

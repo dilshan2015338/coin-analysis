@@ -22,6 +22,9 @@ ADMIN_CHAT_ID_RAW = os.getenv("ADMIN_CHAT_ID")
 if not ADMIN_CHAT_ID_RAW:
     raise ValueError("ADMIN_CHAT_ID is not configured in the environment variables.")
 
+MARKET_ANALYZER_URL = os.getenv("MARKET_ANALYZER_URL", "http://127.0.0.1:8000/api/v1/analyze")
+MARKET_ANALYZER_API_KEY = os.getenv("MARKET_ANALYZER_API_KEY", "lF2vIg=Pik8S_(^iC8$23H&fBz$4h7L6-rOCiZ*x&a#bjvp+(fF_9hTII5aul@gq")
+
 def parse_chat_id(value: str) -> Any:
     value_str = value.strip()
     try:
@@ -497,6 +500,125 @@ async def handle_admin_message(update: Update, context: ContextTypes.DEFAULT_TYP
                 logger.error(f"Error evaluating {resolved} on short_status command: {e}", exc_info=True)
                 await status_msg.edit_text(f"❌ Error during evaluation of *{user_symbol}*: {str(e)}", parse_mode="Markdown")
 
+        elif cmd_type == "analyze":
+            import httpx
+            user_symbol = command["symbol"]
+            resolved = price_fetcher.resolve_symbol(user_symbol)
+
+            # Check if resolved is in watched or just look up on Binance to make sure it's valid
+            prices = await price_fetcher.fetch_prices([resolved])
+            if resolved not in prices:
+                await msg.reply_text(f"❌ Could not find price for *{user_symbol}* on Binance.", parse_mode="Markdown")
+                return
+
+            status_msg = await msg.reply_text(f"⏳ Running market analysis for *{user_symbol}* ({resolved})...", parse_mode="Markdown")
+
+            def format_for_analyzer(resolved_symbol: str) -> str:
+                # standard quote assets
+                for suffix in ("USDT", "USDC", "BUSD", "BTC", "ETH", "EUR", "TRY", "FDUSD"):
+                    if resolved_symbol.endswith(suffix) and len(resolved_symbol) > len(suffix):
+                        base = resolved_symbol[:-len(suffix)]
+                        return f"{base}/{suffix}"
+                return resolved_symbol
+
+            formatted_sym = format_for_analyzer(resolved)
+
+            payload = {
+                "symbol": formatted_sym,
+                "exchange": "binance",
+                "timeframes": ["15m", "1h", "4h"],
+                "include_reasoning": True,
+                "force_refresh": False
+            }
+
+            headers = {
+                "X-API-Key": MARKET_ANALYZER_API_KEY
+            }
+
+            try:
+                async with httpx.AsyncClient() as client:
+                    resp = await client.post(MARKET_ANALYZER_URL, json=payload, headers=headers, timeout=20.0)
+                    if resp.status_code == 403:
+                        await status_msg.edit_text("❌ *Authorization Error*: Invalid X-API-Key configured for the Market Analyzer API.", parse_mode="Markdown")
+                        return
+                    elif resp.status_code != 200:
+                        await status_msg.edit_text(f"❌ *API Error*: Server returned status code {resp.status_code}.", parse_mode="Markdown")
+                        return
+
+                    data = resp.json()
+
+                    # Extract values safely
+                    symbol_res = data.get("symbol", formatted_sym)
+                    regime = data.get("market_regime", "N/A")
+                    reasoning = data.get("reasoning_summary", "N/A")
+                    risk_warning = data.get("risk_warning", "N/A")
+                    exec_time = data.get("execution_time_ms", 0) / 1000.0
+
+                    signals = data.get("microstructure_signals", {})
+                    liq_hunt = "True" if signals.get("liquidity_hunt_detected") else "False"
+                    liq_type = signals.get("liquidity_hunt_type", "NONE")
+                    pump_risk = signals.get("pump_risk_level", "LOW")
+                    sentiment = signals.get("funding_oi_sentiment", "Neutral")
+                    imbalance = signals.get("orderbook_imbalance_ratio", 0.0)
+
+                    rec = data.get("trade_recommendation", {})
+                    rec_action = rec.get("action", "HOLD")
+                    rec_lev = rec.get("recommended_leverage_max", 1)
+                    rec_rr = rec.get("risk_reward_ratio", 0.0)
+
+                    preds = data.get("predictions", {})
+
+                    def format_pred(pred_data):
+                        if not pred_data:
+                            return "_No prediction data available_"
+                        bias = pred_data.get("bias", "NEUTRAL")
+                        conf = pred_data.get("confidence", 0.0) * 100
+                        target = pred_data.get("target_price")
+                        invalidation = pred_data.get("invalidation_price")
+                        driver = pred_data.get("key_driver", "N/A")
+
+                        target_str = format_price(target) if target else "N/A"
+                        inv_str = format_price(invalidation) if invalidation else "N/A"
+
+                        return (
+                            f"`{bias}` (Confidence: {conf:.1f}%)\n"
+                            f"  - Target: *{target_str}* | Invalid: *{inv_str}*\n"
+                            f"  - Key Driver: {driver}"
+                        )
+
+                    pred_15m = format_pred(preds.get("next_15m"))
+                    pred_1h = format_pred(preds.get("next_1h"))
+                    pred_4h = format_pred(preds.get("next_4h"))
+
+                    analysis_response = (
+                        f"📊 *Market Analysis: {symbol_res}* 📊\n"
+                        f"🕒 *Execution:* {exec_time:.2f}s\n\n"
+                        f"📈 *Market Regime:* `{regime}`\n\n"
+                        f"🔍 *Microstructure Signals:*\n"
+                        f"• Liquidity Hunt: *{liq_hunt}* (Type: `{liq_type}`)\n"
+                        f"• Pump Risk Level: *{pump_risk}*\n"
+                        f"• Funding/OI Sentiment: *{sentiment}*\n"
+                        f"• Orderbook Imbalance: *{imbalance:.2f}*\n\n"
+                        f"💡 *Trade Recommendation:*\n"
+                        f"• Action: *{rec_action}*\n"
+                        f"• Max Leverage: *{rec_lev}x*\n"
+                        f"• Risk/Reward Ratio: *{rec_rr:.2f}*\n\n"
+                        f"🔮 *Predictions:*\n"
+                        f"• *15m Bias:* {pred_15m}\n"
+                        f"• *1h Bias:* {pred_1h}\n"
+                        f"• *4h Bias:* {pred_4h}\n\n"
+                        f"📝 *Reasoning Summary:*\n"
+                        f"_{reasoning}_\n\n"
+                        f"⚠️ *Risk Warning:*\n"
+                        f"_{risk_warning}_"
+                    )
+
+                    await status_msg.edit_text(analysis_response, parse_mode="Markdown")
+
+            except Exception as e:
+                logger.error(f"Error querying market analyzer for {resolved}: {e}", exc_info=True)
+                await status_msg.edit_text(f"❌ *Connection Error*: Failed to connect to Market Analyzer API at {MARKET_ANALYZER_URL}.\nDetails: `{str(e)}`", parse_mode="Markdown")
+
         elif cmd_type == "gainers":
             min_percent = command.get("min_percent")
             if min_percent is None:
@@ -600,14 +722,18 @@ async def handle_admin_message(update: Update, context: ContextTypes.DEFAULT_TYP
                 "Evaluate confluences and get entry/exit short signals on demand:\n"
                 "<code>/short_status BTC</code> or <code>/evaluate ETH</code>\n"
                 "<i>(Alternative: <code>CONFIG SHORT_STATUS BTC</code>)</i>\n\n"
-                "1️⃣2️⃣ <b>24h Gainer Scanner Settings</b>\n"
+                "1️⃣2️⃣ <b>Market Analysis</b>\n"
+                "Query local market analyzer for regime, microstructure, trade rec and predictions:\n"
+                "<code>/analyze BTC</code> or <code>/analysis ETH</code>\n"
+                "<i>(Alternative: <code>CONFIG ANALYZE BTC</code>)</i>\n\n"
+                "1️⃣3️⃣ <b>24h Gainer Scanner Settings</b>\n"
                 "Get current top gainers list:\n"
                 "<code>/gainers</code> or <code>/gainers 30</code>\n"
                 "Set automatic alert threshold percentage:\n"
                 "<code>/set_gainer_threshold 40</code>\n"
                 "Toggle background scanner ON or OFF:\n"
                 "<code>/gainer_scanner ON</code> or <code>/gainer_scanner OFF</code>\n\n"
-                "1️⃣3️⃣ <b>Help Instructions</b>\n"
+                "1️⃣4️⃣ <b>Help Instructions</b>\n"
                 "Display this help message:\n"
                 "<code>/help</code> or <code>/start</code>\n"
                 "<i>(Alternative: <code>CONFIG HELP</code>)</i>"
