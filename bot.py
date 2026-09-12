@@ -627,32 +627,231 @@ async def handle_admin_message(update: Update, context: ContextTypes.DEFAULT_TYP
                 except ValueError:
                     min_percent = 50.0
                     
-            await msg.reply_text(f"⏳ Querying Binance 24h market stats for pairs >={min_percent}% gain...")
+            status_msg = await msg.reply_text(f"⏳ Scanning Binance 24h market stats for pairs >= <b>{min_percent:.0f}%</b> gain...", parse_mode="HTML")
             
             tickers = await gainer_service.fetch_24h_tickers()
             if not tickers:
-                await msg.reply_text("❌ Failed to fetch market stats from Binance.")
+                await status_msg.edit_text("❌ Failed to fetch market stats from Binance.", parse_mode="HTML")
                 return
 
             gainers = gainer_service.filter_gainers(tickers, min_percent)
             if not gainers:
-                await msg.reply_text(f"No USDT trading pairs met the >={min_percent}% gain criteria.")
+                await status_msg.edit_text(f"ℹ️ No USDT trading pairs currently meet the >= <b>{min_percent:.0f}%</b> gain criteria.", parse_mode="HTML")
                 return
 
             # Display top 15
             top_gainers = gainers[:15]
-            response = f"🚀 *24-Hour Top Gainers (>={min_percent}%)*\n\n"
+            response = (
+                f"⚡ <b>CryptoPulse VIP | 24h Top Gainers</b> ⚡\n"
+                f"━━━━━━━━━━━━━━━━━━━━━\n"
+                f"🔥 <i>Pairs with &gt;={min_percent:.0f}% rolling 24h momentum</i>\n\n"
+            )
             for g in top_gainers:
                 sym = g["symbol"]
                 change = g["priceChangePercent"]
                 price = g["lastPrice"]
                 vol = g["quoteVolume"]
-                response += f"• *{sym}*: +{change:.1f}% | Price: {gainer_service.format_price(price)} | Vol: {gainer_service.format_volume(vol)}\n"
+                response += f"• <b>#{sym}</b>: <code>+{change:.2f}%</code> 🟢 | <code>{gainer_service.format_price(price)}</code> | Vol: <code>{gainer_service.format_volume(vol)}</code>\n"
                 
             if len(gainers) > 15:
-                response += f"\n_(showing top 15 out of {len(gainers)} total gainers above {min_percent}%)_"
+                response += f"\n<i>(showing top 15 out of {len(gainers)} total gainers above {min_percent:.0f}%)</i>\n"
                 
-            await msg.reply_text(response, parse_mode="Markdown")
+            response += (
+                f"\n━━━━━━━━━━━━━━━━━━━━━\n"
+                f"💡 <i>Tip: Type <code>/chart &lt;symbol&gt;</code> to view the momentum candlestick chart!</i>"
+            )
+                
+            await status_msg.edit_text(response, parse_mode="HTML")
+
+        elif cmd_type == "pump_card":
+            import card_service
+            import httpx
+            user_symbol = command["symbol"]
+            resolved = price_fetcher.resolve_symbol(user_symbol)
+
+            status_msg = await msg.reply_text(f"⏳ Generating VIP pump alert card for <b>#{resolved}</b>...", parse_mode="HTML")
+            try:
+                # Fetch 24h ticker for coin
+                async with httpx.AsyncClient() as client:
+                    resp = await client.get(f"https://api.binance.com/api/v3/ticker/24hr?symbol={resolved}", timeout=10.0)
+                    if resp.status_code != 200:
+                        await status_msg.edit_text(f"❌ Could not find 24h statistics for <b>#{resolved}</b> on Binance.", parse_mode="HTML")
+                        return
+                    d = resp.json()
+
+                current_pct = float(d.get("priceChangePercent", 0.0))
+                current_price = float(d.get("lastPrice", 0.0))
+                high_24h = float(d.get("highPrice", 0.0))
+                low_24h = float(d.get("lowPrice", 0.0))
+                volume_24h = float(d.get("quoteVolume", 0.0))
+
+                card_bytes, multiplier = await card_service.generate_combined_alert(
+                    symbol=resolved,
+                    current_pct=current_pct,
+                    current_price=current_price,
+                    high_24h=high_24h,
+                    low_24h=low_24h,
+                    volume_24h=volume_24h
+                )
+
+                card_caption = gainer_service.format_pump_alert(
+                    symbol=resolved,
+                    current_pct=current_pct,
+                    current_price=current_price,
+                    high_24h=high_24h,
+                    low_24h=low_24h,
+                    volume_24h=volume_24h,
+                    multiplier=multiplier
+                )
+
+                await status_msg.delete()
+                if card_bytes:
+                    await msg.reply_photo(
+                        photo=card_bytes,
+                        caption=card_caption,
+                        parse_mode="HTML"
+                    )
+                else:
+                    await msg.reply_text(card_caption, parse_mode="HTML")
+            except Exception as e:
+                logger.error(f"Error handling pump_card command for {resolved}: {e}", exc_info=True)
+                await status_msg.edit_text(f"❌ Error generating VIP card for <b>#{resolved}</b>: {str(e)}", parse_mode="HTML")
+
+        elif cmd_type == "pump_chart":
+            import chart_service
+            import httpx
+            user_symbol = command["symbol"]
+            resolved = price_fetcher.resolve_symbol(user_symbol)
+
+            status_msg = await msg.reply_text(f"⏳ Generating momentum chart for <b>#{resolved}</b>...", parse_mode="HTML")
+            try:
+                # Fetch 24h ticker for coin
+                async with httpx.AsyncClient() as client:
+                    resp = await client.get(f"https://api.binance.com/api/v3/ticker/24hr?symbol={resolved}", timeout=10.0)
+                    if resp.status_code != 200:
+                        await status_msg.edit_text(f"❌ Could not find 24h statistics for <b>#{resolved}</b> on Binance.", parse_mode="HTML")
+                        return
+                    d = resp.json()
+
+                current_pct = float(d.get("priceChangePercent", 0.0))
+                current_price = float(d.get("lastPrice", 0.0))
+                high_24h = float(d.get("highPrice", 0.0))
+                low_24h = float(d.get("lowPrice", 0.0))
+                volume_24h = float(d.get("quoteVolume", 0.0))
+
+                chart_bytes, multiplier = await chart_service.generate_pump_chart(
+                    symbol=resolved,
+                    current_pct=current_pct,
+                    current_price=current_price,
+                    high_24h=high_24h,
+                    low_24h=low_24h,
+                    volume_24h=volume_24h
+                )
+
+                card_caption = gainer_service.format_pump_alert(
+                    symbol=resolved,
+                    current_pct=current_pct,
+                    current_price=current_price,
+                    high_24h=high_24h,
+                    low_24h=low_24h,
+                    volume_24h=volume_24h,
+                    multiplier=multiplier
+                )
+
+                await status_msg.delete()
+                if chart_bytes:
+                    await msg.reply_photo(
+                        photo=chart_bytes,
+                        caption=card_caption,
+                        parse_mode="HTML"
+                    )
+                else:
+                    await msg.reply_text(card_caption, parse_mode="HTML")
+            except Exception as e:
+                logger.error(f"Error handling pump_chart command for {resolved}: {e}", exc_info=True)
+                await status_msg.edit_text(f"❌ Error generating chart for <b>#{resolved}</b>: {str(e)}", parse_mode="HTML")
+
+        elif cmd_type == "test_pump":
+            import card_service
+            import gainer_service
+            
+            raw_sym = command.get("symbol") or "TESTUSDT"
+            resolved = price_fetcher.resolve_symbol(raw_sym) if raw_sym != "TESTUSDT" else "TESTUSDT"
+
+            status_msg = await msg.reply_text(f"🧪 Generating simulated VIP pump alert for <b>#{resolved}</b>...", parse_mode="HTML")
+            try:
+                test_pct = 45.23
+                test_price = 0.0350
+                test_high = 0.0350
+                test_low = 0.0215
+                test_vol = 261850.0
+                test_multiplier = 1.6
+
+                if resolved != "TESTUSDT":
+                    try:
+                        import httpx
+                        async with httpx.AsyncClient() as client:
+                            resp = await client.get(f"https://api.binance.com/api/v3/ticker/24hr?symbol={resolved}", timeout=6.0)
+                            if resp.status_code == 200:
+                                d = resp.json()
+                                test_price = float(d.get("lastPrice", 0.0))
+                                test_high = float(d.get("highPrice", test_price * 1.05))
+                                test_low = float(d.get("lowPrice", test_price * 0.70))
+                                test_vol = float(d.get("quoteVolume", 500000.0))
+                                real_pct = float(d.get("priceChangePercent", 0.0))
+                                test_pct = real_pct if real_pct >= 20.0 else 52.40
+                                test_multiplier = 2.4
+                    except Exception as fe:
+                        logger.debug(f"Ticker fetch failed for test {resolved}, using default test values: {fe}")
+
+                card_bytes, _ = await card_service.generate_combined_alert(
+                    symbol=resolved,
+                    current_pct=test_pct,
+                    current_price=test_price,
+                    high_24h=test_high,
+                    low_24h=test_low,
+                    volume_24h=test_vol,
+                    multiplier=test_multiplier
+                )
+
+                card_caption = gainer_service.format_pump_alert(
+                    symbol=resolved,
+                    current_pct=test_pct,
+                    current_price=test_price,
+                    high_24h=test_high,
+                    low_24h=test_low,
+                    volume_24h=test_vol,
+                    multiplier=test_multiplier
+                )
+
+                await status_msg.delete()
+                if card_bytes:
+                    await msg.reply_photo(
+                        photo=card_bytes,
+                        caption=card_caption,
+                        parse_mode="HTML"
+                    )
+                else:
+                    await msg.reply_text(card_caption, parse_mode="HTML")
+
+                # Dispatch test copy to TARGET_CHAT_ID to test end-to-end integration
+                target_chat = gainer_service.TARGET_CHAT_ID
+                if target_chat and target_chat != msg.chat.id:
+                    try:
+                        card_bytes.seek(0)
+                        await context.bot.send_photo(
+                            chat_id=target_chat,
+                            photo=card_bytes,
+                            caption=card_caption,
+                            parse_mode="HTML"
+                        )
+                        await msg.reply_text(f"✅ Successfully dispatched test pump alert to target channel (<code>{target_chat}</code>)!", parse_mode="HTML")
+                    except Exception as te:
+                        await msg.reply_text(f"⚠️ Warning: Could not post to target channel (<code>{target_chat}</code>): <i>{str(te)}</i>", parse_mode="HTML")
+
+            except Exception as e:
+                logger.error(f"Error executing test_pump command: {e}", exc_info=True)
+                await status_msg.edit_text(f"❌ Error generating test alert: {str(e)}", parse_mode="HTML")
 
         elif cmd_type == "set_gainer_threshold":
             percent = command["percent"]
@@ -733,7 +932,15 @@ async def handle_admin_message(update: Update, context: ContextTypes.DEFAULT_TYP
                 "<code>/set_gainer_threshold 40</code>\n"
                 "Toggle background scanner ON or OFF:\n"
                 "<code>/gainer_scanner ON</code> or <code>/gainer_scanner OFF</code>\n\n"
-                "1️⃣4️⃣ <b>Help Instructions</b>\n"
+                "1️⃣4️⃣ <b>Momentum Breakout Chart & VIP Card</b>\n"
+                "Generate live VIP pump alert card:\n"
+                "<code>/pump VTHO</code> or <code>/pump CREAMUSDT</code>\n"
+                "Generate live 15M momentum candlestick chart:\n"
+                "<code>/chart VTHO</code> or <code>/chart CREAMUSDT</code>\n\n"
+                "1️⃣5️⃣ <b>Test Alert Integration</b>\n"
+                "Simulate mock pump alert and test Telegram target channel integration:\n"
+                "<code>/test_pump</code> or <code>/test_pump BTC</code>\n\n"
+                "1️⃣6️⃣ <b>Help Instructions</b>\n"
                 "Display this help message:\n"
                 "<code>/help</code> or <code>/start</code>\n"
                 "<i>(Alternative: <code>CONFIG HELP</code>)</i>"

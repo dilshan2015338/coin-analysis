@@ -438,15 +438,16 @@ def get_last_gainer_alert(symbol: str) -> Optional[Dict[str, Any]]:
         row = cursor.fetchone()
         return dict(row) if row else None
 
-def insert_gainer_alert(symbol: str, price_change_pct: float, price_at_alert: float):
-    """Inserts a new gainer alert record with timezone-aware timestamp string."""
+def insert_gainer_alert(symbol: str, price_change_pct: float, price_at_alert: float) -> int:
+    """Inserts a new gainer alert record with timezone-aware timestamp string and returns the alert ID."""
     now_str = datetime.datetime.now(datetime.timezone.utc).isoformat()
     with get_connection() as conn:
-        conn.execute(
+        cursor = conn.execute(
             "INSERT INTO gainer_alerts_history (symbol, price_change_pct, price_at_alert, alerted_at) VALUES (?, ?, ?, ?);",
             (symbol, price_change_pct, price_at_alert, now_str)
         )
         conn.commit()
+        return cursor.lastrowid
 
 # --- Recurring Updates Operations ---
 

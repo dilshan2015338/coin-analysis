@@ -10,6 +10,8 @@ import datetime
 from typing import List, Dict, Any, Optional
 
 import db
+import chart_service
+import card_service
 
 logger = logging.getLogger(__name__)
 
@@ -38,11 +40,43 @@ def format_volume(vol: float) -> str:
         return f"${vol:,.2f}"
 
 def format_price(price: float) -> str:
-    """Formats coin prices cleanly."""
-    if price >= 1.0:
+    """Formats coin prices cleanly based on magnitude."""
+    if price is None:
+        return "$0.00"
+    if price >= 1000.0:
         return f"${price:,.2f}"
+    elif price >= 1.0:
+        return f"${price:,.4f}".rstrip('0').rstrip('.') if f"${price:,.4f}".endswith('0') and not f"${price:,.2f}".endswith('.00') else f"${price:,.2f}"
+    elif price >= 0.01:
+        return f"${price:.4f}"
+    elif price >= 0.0001:
+        return f"${price:.6f}"
     else:
-        return f"${price:,.6f}"
+        return f"${price:.8f}"
+
+def format_pump_alert(
+    symbol: str,
+    current_pct: float,
+    current_price: Optional[float] = None,
+    high_24h: Optional[float] = None,
+    low_24h: Optional[float] = None,
+    volume_24h: Optional[float] = None,
+    multiplier: Optional[float] = None,
+    alert_id: Optional[int] = None
+) -> str:
+    """
+    Formats a sleek, creative Telegram alert caption highlighting:
+    - CryptoPulse VIP Bot
+    - PUMP ALERT
+    - Currency pair
+    - 24h Change
+    """
+    pct_str = f"+{current_pct:.2f}%" if current_pct >= 0 else f"{current_pct:.2f}%"
+    return (
+        f"⚡ <b>CryptoPulse VIP Bot</b>\n"
+        f"<blockquote>🚨 <b>PUMP ALERT:</b> <b>#{symbol}</b> ➔ <code>{pct_str}</code> 🟢</blockquote>"
+    )
+
 
 async def fetch_24h_tickers() -> List[dict]:
     """Queries the Binance Spot API for rolling 24-hour ticker statistics."""
@@ -180,26 +214,55 @@ async def run_gainer_scanner(application: Any):
 
         if should_alert:
             # 3. Log alert in database to trigger cooldown tracker
-            db.insert_gainer_alert(symbol, current_pct, current_price)
+            alert_id = db.insert_gainer_alert(symbol, current_pct, current_price)
 
-            # 4. Dispatch alert to Target Channel
-            msg = (
-                f"🚨 *PUMP ALERT: 24h Gain Exceeded {threshold:.0f}%* 🚨\n\n"
-                f"• *Symbol*: {symbol}\n"
-                f"• *24h Change*: +{current_pct:.1f}%\n"
-                f"• *Current Price*: {format_price(current_price)}\n"
-                f"• *24h High / Low*: {format_price(high_24h)} / {format_price(low_24h)}\n"
-                f"• *24h Volume*: {format_volume(volume_24h)} USDT"
+            # 4. Generate combined VIP alert card + chart and dispatch alert to Target Channel
+            card_bytes, multiplier = await card_service.generate_combined_alert(
+                symbol=symbol,
+                current_pct=current_pct,
+                current_price=current_price,
+                high_24h=high_24h,
+                low_24h=low_24h,
+                volume_24h=volume_24h
             )
+
+            msg = format_pump_alert(
+                symbol=symbol,
+                current_pct=current_pct,
+                current_price=current_price,
+                high_24h=high_24h,
+                low_24h=low_24h,
+                volume_24h=volume_24h,
+                multiplier=multiplier
+            )
+
             try:
-                await application.bot.send_message(
-                    chat_id=TARGET_CHAT_ID,
-                    text=msg,
-                    parse_mode="Markdown"
-                )
-                logger.info(f"Sent 24h pump alert to Telegram for {symbol} (+{current_pct:.1f}%)")
+                if card_bytes:
+                    await application.bot.send_photo(
+                        chat_id=TARGET_CHAT_ID,
+                        photo=card_bytes,
+                        caption=msg,
+                        parse_mode="HTML"
+                    )
+                    logger.info(f"Sent 24h VIP pump alert card to Telegram for {symbol} (+{current_pct:.1f}%)")
+                else:
+                    await application.bot.send_message(
+                        chat_id=TARGET_CHAT_ID,
+                        text=msg,
+                        parse_mode="HTML"
+                    )
+                    logger.info(f"Sent 24h pump alert text to Telegram for {symbol} (+{current_pct:.1f}%)")
             except Exception as e:
-                logger.error(f"Failed to send pump alert for {symbol} to Telegram: {e}")
+                logger.error(f"Failed to send pump alert with photo for {symbol}: {e}. Trying text fallback...")
+                try:
+                    await application.bot.send_message(
+                        chat_id=TARGET_CHAT_ID,
+                        text=msg,
+                        parse_mode="HTML"
+                    )
+                    logger.info(f"Sent fallback text pump alert for {symbol} (+{current_pct:.1f}%)")
+                except Exception as fe:
+                    logger.error(f"Failed fallback pump alert for {symbol}: {fe}")
 
             # 5. Run Mean Reversion Short Analyst signal evaluation
             try:

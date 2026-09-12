@@ -173,6 +173,35 @@ def parse_message_command(text: str) -> Optional[Dict[str, Any]]:
             "min_percent": float(min_pct) if min_pct else None
         }
 
+    # 8b. Momentum Candlestick Chart Command
+    # Matches: /chart [SYMBOL]
+    chart_match = re.search(r"^/chart\s+(\S+)$", text, re.IGNORECASE)
+    if chart_match:
+        return {
+            "type": "pump_chart",
+            "symbol": chart_match.group(1).upper()
+        }
+
+    # 8c. VIP Pump Alert Card Command
+    # Matches: /pump [SYMBOL]
+    pump_match = re.search(r"^/pump\s+(\S+)$", text, re.IGNORECASE)
+    if pump_match:
+        return {
+            "type": "pump_card",
+            "symbol": pump_match.group(1).upper()
+        }
+
+    # 8d. Test Pump Alert Command (Integration Testing)
+    # Matches: /test_pump [SYMBOL]? or /test_alert [SYMBOL]?
+    test_pump_match = re.search(r"^(?:/test_pump|/test_alert)(?:\s+(\S+))?$", text, re.IGNORECASE)
+    if test_pump_match:
+        sym = test_pump_match.group(1)
+        return {
+            "type": "test_pump",
+            "symbol": sym.upper() if sym else "TESTUSDT"
+        }
+
+
     # 9. Set Gainer Threshold Command
     # Matches: /set_gainer_threshold [PERCENT] or CONFIG GAINER_THRESHOLD [PERCENT]
     threshold_match = re.search(r"^(?:/set_gainer_threshold|CONFIG\s+GAINER_THRESHOLD)\s+(\d+(?:\.\d+)?)$", text, re.IGNORECASE)
