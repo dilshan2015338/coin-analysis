@@ -23,3 +23,7 @@ env/
 # OS metadata
 .DS_Store
 Thumbs.db
+
+# Test & Preview images
+test_*_preview.png
+

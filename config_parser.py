@@ -173,6 +173,16 @@ def parse_message_command(text: str) -> Optional[Dict[str, Any]]:
             "min_percent": float(min_pct) if min_pct else None
         }
 
+    # 8-losers. Losers Command
+    # Matches: /losers [MIN_PERCENT] or /dumps [MIN_PERCENT] or CONFIG LOSERS [MIN_PERCENT]
+    losers_match = re.search(r"^(?:/losers|/dumps|CONFIG\s+(?:LOSERS|DUMPS))(?:\s+(\d+(?:\.\d+)?))?$", text, re.IGNORECASE)
+    if losers_match:
+        min_pct = losers_match.group(1)
+        return {
+            "type": "losers",
+            "min_percent": float(min_pct) if min_pct else None
+        }
+
     # 8b. Momentum Candlestick Chart Command
     # Matches: /chart [SYMBOL]
     chart_match = re.search(r"^/chart\s+(\S+)$", text, re.IGNORECASE)
@@ -191,6 +201,15 @@ def parse_message_command(text: str) -> Optional[Dict[str, Any]]:
             "symbol": pump_match.group(1).upper()
         }
 
+    # 8c-dump. VIP Dump Alert Card Command
+    # Matches: /dump [SYMBOL]
+    dump_match = re.search(r"^/dump\s+(\S+)$", text, re.IGNORECASE)
+    if dump_match:
+        return {
+            "type": "dump_card",
+            "symbol": dump_match.group(1).upper()
+        }
+
     # 8d. Test Pump Alert Command (Integration Testing)
     # Matches: /test_pump [SYMBOL]? or /test_alert [SYMBOL]?
     test_pump_match = re.search(r"^(?:/test_pump|/test_alert)(?:\s+(\S+))?$", text, re.IGNORECASE)
@@ -201,6 +220,15 @@ def parse_message_command(text: str) -> Optional[Dict[str, Any]]:
             "symbol": sym.upper() if sym else "TESTUSDT"
         }
 
+    # 8d-dump. Test Dump Alert Command (Integration Testing)
+    # Matches: /test_dump [SYMBOL]?
+    test_dump_match = re.search(r"^/test_dump(?:\s+(\S+))?$", text, re.IGNORECASE)
+    if test_dump_match:
+        sym = test_dump_match.group(1)
+        return {
+            "type": "test_dump",
+            "symbol": sym.upper() if sym else "TESTUSDT"
+        }
 
     # 9. Set Gainer Threshold Command
     # Matches: /set_gainer_threshold [PERCENT] or CONFIG GAINER_THRESHOLD [PERCENT]
@@ -209,6 +237,15 @@ def parse_message_command(text: str) -> Optional[Dict[str, Any]]:
         return {
             "type": "set_gainer_threshold",
             "percent": float(threshold_match.group(1))
+        }
+
+    # 9-dump. Set Dump Threshold Command
+    # Matches: /set_dump_threshold [PERCENT] or CONFIG DUMP_THRESHOLD [PERCENT]
+    dump_thresh_match = re.search(r"^(?:/set_dump_threshold|CONFIG\s+DUMP_THRESHOLD)\s+(\d+(?:\.\d+)?)$", text, re.IGNORECASE)
+    if dump_thresh_match:
+        return {
+            "type": "set_dump_threshold",
+            "percent": float(dump_thresh_match.group(1))
         }
 
     # 10. Gainer Scanner Toggle Command

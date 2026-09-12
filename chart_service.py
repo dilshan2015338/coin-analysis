@@ -1,6 +1,7 @@
 import io
 import logging
 import datetime
+import random
 from typing import Optional, Tuple, List
 import httpx
 
@@ -335,33 +336,40 @@ def render_chart_image(
     elif volume_24h >= 1_000:
         vol_24h_str = f" · 24h Vol: ${volume_24h/1_000:.1f}K USDT"
         
+    subtitle = "15M Downside Breakdown" if current_pct < 0 else "15M Momentum Breakout"
     fig.text(
         0.05, 0.915, 
-        f"15M Momentum Breakout{vol_24h_str}", 
+        f"{subtitle}{vol_24h_str}", 
         color=TEXT_MUTED, 
         fontsize=9
     )
 
-    # Percentage Surge Badge (Top Right)
-    pct_text = f"+{current_pct:.2f}%" if current_pct >= 0 else f"{current_pct:.2f}%"
-    mult_tag = f" ({multiplier:.1f}x Surge)" if multiplier and multiplier >= 1.2 else ""
+    # Percentage Badge (Top Right)
+    is_down = current_pct < 0
+    pct_text = f"{current_pct:.2f}%" if is_down else f"+{current_pct:.2f}%"
+    mult_suffix = "Vol" if is_down else "Surge"
+    mult_tag = f" ({multiplier:.1f}x {mult_suffix})" if multiplier and multiplier >= 1.2 else ""
     badge_content = f"  {pct_text}{mult_tag}  "
     
+    badge_fc = RED if is_down else GREEN
+    badge_ec = "#FECACA" if is_down else "#A7F3D0"
+    badge_tc = "#FFFFFF" if is_down else "#041F12"
+
     fig.text(
         0.95, 0.935, 
         badge_content, 
-        color="#041F12", 
+        color=badge_tc, 
         fontsize=11, 
         fontweight="bold",
         ha="right", 
         va="center",
-        bbox=dict(boxstyle="round,pad=0.45", fc=GREEN, ec="#A7F3D0", lw=1.0)
+        bbox=dict(boxstyle="round,pad=0.45", fc=badge_fc, ec=badge_ec, lw=1.0)
     )
 
     # Watermark / Footer
     fig.text(
         0.95, 0.02, 
-        "CryptoPulse VIP Momentum Bot", 
+        "CryptoPulse VIP Radar Bot", 
         color="#475569", 
         fontsize=8, 
         ha="right"
@@ -381,6 +389,54 @@ def render_chart_image(
     buf.seek(0)
     return buf
 
+def generate_synthetic_klines(
+    current_price: float,
+    current_pct: float,
+    high_24h: float,
+    low_24h: float,
+    volume_24h: float,
+    n_candles: int = 36
+) -> List[list]:
+    """Generates realistic synthetic 15M candlesticks for mock/test simulations."""
+    now = datetime.datetime.now(datetime.timezone.utc)
+    interval_ms = 15 * 60 * 1000
+    start_ts = int((now - datetime.timedelta(minutes=15 * n_candles)).timestamp() * 1000)
+    
+    start_price = current_price / (1.0 + current_pct / 100.0) if current_pct != -100 else current_price * 1.5
+    klines = []
+    avg_vol = (volume_24h / 96.0) if volume_24h else 100000.0
+    
+    for i in range(n_candles):
+        candle_ts = start_ts + i * interval_ms
+        progress = i / float(n_candles - 1)
+        
+        if current_pct >= 0:
+            if progress < 0.65:
+                trend_price = start_price * (1.0 + (random.random() - 0.5) * 0.03)
+                vol = avg_vol * (0.6 + random.random() * 0.5)
+            else:
+                surge_p = (progress - 0.65) / 0.35
+                trend_price = start_price + (current_price - start_price) * (surge_p ** 1.3)
+                vol = avg_vol * (1.5 + surge_p * 2.0)
+        else:
+            if progress < 0.60:
+                trend_price = start_price * (1.0 + (random.random() - 0.5) * 0.03)
+                vol = avg_vol * (0.6 + random.random() * 0.5)
+            else:
+                dump_p = (progress - 0.60) / 0.40
+                trend_price = start_price - (start_price - current_price) * (dump_p ** 1.3)
+                vol = avg_vol * (1.8 + dump_p * 2.5)
+
+        o = trend_price * (1.0 + (random.random() - 0.5) * 0.008)
+        c = trend_price * (1.0 + (random.random() - 0.5) * 0.008)
+        if i == n_candles - 1:
+            c = current_price
+        h = max(o, c) * (1.0 + random.random() * 0.006)
+        l = min(o, c) * (1.0 - random.random() * 0.006)
+        klines.append([candle_ts, f'{o:.6f}', f'{h:.6f}', f'{l:.6f}', f'{c:.6f}', 1000, candle_ts + interval_ms, f'{vol:.2f}'])
+        
+    return klines
+
 async def generate_pump_chart(
     symbol: str,
     current_pct: float,
@@ -399,8 +455,14 @@ async def generate_pump_chart(
             klines = await fetch_klines(symbol, interval="1h", limit=24)
             
         if not klines or len(klines) < 5:
-            logger.warning(f"Insufficient kline data to generate chart for {symbol}")
-            return None, None
+            # If symbol is TESTUSDT or simulation asset, synthesize realistic candlesticks
+            sym_upper = symbol.upper()
+            if sym_upper.startswith("TEST") or "TEST" in sym_upper or "MOCK" in sym_upper or "DEMO" in sym_upper:
+                logger.info(f"Generating synthetic 15M candlesticks for simulated asset {symbol}")
+                klines = generate_synthetic_klines(current_price, current_pct, high_24h, low_24h, volume_24h)
+            else:
+                logger.warning(f"Insufficient kline data to generate chart for {symbol}")
+                return None, None
 
         multiplier = calculate_surge_multiplier(klines)
         

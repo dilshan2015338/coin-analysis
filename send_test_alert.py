@@ -16,8 +16,9 @@ import gainer_service
 import price_fetcher
 
 async def main():
-    parser = argparse.ArgumentParser(description="Test and simulate a VIP Pump Alert to verify Telegram channel integrations.")
-    parser.add_argument("symbol", nargs="?", default="TESTUSDT", help="Trading pair to test (default: TESTUSDT, or e.g. BTC, PNT, VTHO)")
+    parser = argparse.ArgumentParser(description="Test and simulate a VIP Pump/Dump Alert to verify Telegram channel integrations.")
+    parser.add_argument("symbol", nargs="?", default="TESTUSDT", help="Trading pair to test (default: TESTUSDT, or e.g. BTC, PNT, VTHO, LUNA)")
+    parser.add_argument("--dump", action="store_true", help="Simulate a 24h Downside Dump Alert (red theme) instead of a Pump Alert")
     parser.add_argument("--preview", action="store_true", help="Only generate and save PNG preview locally without posting to Telegram")
     parser.add_argument("--chat_id", type=str, default=None, help="Override target chat ID for this test")
     args = parser.parse_args()
@@ -25,17 +26,26 @@ async def main():
     raw_symbol = args.symbol.upper()
     resolved = price_fetcher.resolve_symbol(raw_symbol) if raw_symbol != "TESTUSDT" else "TESTUSDT"
 
-    print(f"🧪 Generating test pump data for #{resolved}...")
+    alert_type = "dump" if args.dump else "pump"
+    print(f"🧪 Generating test {alert_type} data for #{resolved}...")
 
     # Default simulation data
-    test_pct = 45.23
-    test_price = 0.0350
-    test_high = 0.0350
-    test_low = 0.0215
-    test_vol = 261850.0
-    test_multiplier = 1.6
+    if args.dump:
+        test_pct = -34.50
+        test_price = 0.3850
+        test_high = 0.5890
+        test_low = 0.3620
+        test_vol = 85200000.0
+        test_multiplier = 2.7
+    else:
+        test_pct = 45.23
+        test_price = 0.0350
+        test_high = 0.0350
+        test_low = 0.0215
+        test_vol = 261850.0
+        test_multiplier = 1.6
 
-    # If user provided a real coin symbol, fetch its actual price and simulate a pump surge
+    # If user provided a real coin symbol, fetch its actual price and simulate
     if resolved != "TESTUSDT":
         try:
             async with httpx.AsyncClient() as client:
@@ -43,18 +53,25 @@ async def main():
                 if resp.status_code == 200:
                     d = resp.json()
                     test_price = float(d.get("lastPrice", test_price))
-                    test_high = float(d.get("highPrice", test_price * 1.08))
-                    test_low = float(d.get("lowPrice", test_price * 0.75))
-                    test_vol = float(d.get("quoteVolume", test_vol))
                     real_pct = float(d.get("priceChangePercent", 0.0))
-                    test_pct = real_pct if real_pct >= 20.0 else 48.65
-                    test_multiplier = 2.4
+                    test_vol = float(d.get("quoteVolume", test_vol))
+                    
+                    if args.dump:
+                        test_high = float(d.get("highPrice", test_price * 1.45))
+                        test_low = float(d.get("lowPrice", test_price * 0.95))
+                        test_pct = real_pct if real_pct <= -20.0 else -35.80
+                        test_multiplier = 2.5
+                    else:
+                        test_high = float(d.get("highPrice", test_price * 1.08))
+                        test_low = float(d.get("lowPrice", test_price * 0.75))
+                        test_pct = real_pct if real_pct >= 20.0 else 48.65
+                        test_multiplier = 2.4
                     print(f"ℹ️ Loaded live Binance ticker for #{resolved}: ${test_price}")
         except Exception as e:
             print(f"⚠️ Could not fetch live ticker: {e}. Using simulated values.")
 
     # Generate Combined VIP Card + 15M Chart
-    print("🎨 Rendering VIP Pump Alert Card + 15M Candlestick Chart graphic...")
+    print(f"🎨 Rendering VIP {alert_type.capitalize()} Alert Card + 15M Candlestick Chart graphic...")
     card_bytes, _ = await card_service.generate_combined_alert(
         symbol=resolved,
         current_pct=test_pct,
@@ -76,7 +93,8 @@ async def main():
     )
 
     # Local file preview
-    preview_file = os.path.join(BASE_DIR, "test_pump_preview.png")
+    preview_filename = f"test_{alert_type}_preview.png"
+    preview_file = os.path.join(BASE_DIR, preview_filename)
     with open(preview_file, "wb") as f:
         f.write(card_bytes.getvalue())
     print(f"✅ Saved local image preview to: {preview_file}")

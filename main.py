@@ -57,6 +57,15 @@ def format_price(price: float) -> str:
     else:
         return f"${price:,.6f}"
 
+async def safe_send_markdown(bot, chat_id, text: str):
+    """Sends a markdown message with automatic plain-text fallback on parse errors."""
+    try:
+        await bot.send_message(chat_id=chat_id, text=text, parse_mode="Markdown")
+    except Exception as e:
+        logger.warning(f"Markdown send failed ({e}), falling back to plain text delivery...")
+        clean_text = text.replace('*', '').replace('`', '').replace('_', '')
+        await bot.send_message(chat_id=chat_id, text=clean_text)
+
 async def price_polling_loop(application: Application):
     """Continuously polls price feeds and alerts the target channel when conditions are met."""
     logger.info("Starting crypto price polling loop...")
@@ -106,17 +115,14 @@ async def price_polling_loop(application: Application):
                     db.mark_target_alert_triggered(alert_id)
 
                     user_sym = symbol_to_user.get(symbol, symbol)
+                    safe_user_sym = user_sym.replace('_', '\\_')
                     msg = (
                         f"🚨 *Crypto Price Target Alert* 🚨\n\n"
-                        f"Asset: *{user_sym}*\n"
+                        f"Asset: *{safe_user_sym}*\n"
                         f"Target Crossed: {condition} *{format_price(target_price)}*\n"
                         f"Current Price: *{format_price(current_price)}*\n"
                     )
-                    await application.bot.send_message(
-                        chat_id=TARGET_CHAT_ID,
-                        text=msg,
-                        parse_mode="Markdown"
-                    )
+                    await safe_send_markdown(application.bot, TARGET_CHAT_ID, msg)
                     logger.info(f"Target Alert Triggered: {symbol} is {current_price} (Target: {condition} {target_price})")
 
             # 4. Check step thresholds
@@ -139,20 +145,17 @@ async def price_polling_loop(application: Application):
 
                     direction = "📈 Up" if price_change > 0 else "📉 Down"
                     user_sym = symbol_to_user.get(symbol, symbol)
+                    safe_user_sym = user_sym.replace('_', '\\_')
 
                     msg = (
                         f"⚡ *Crypto Step Alert* ⚡\n\n"
-                        f"Asset: *{user_sym}*\n"
+                        f"Asset: *{safe_user_sym}*\n"
                         f"Movement: {direction}\n"
                         f"Change: *{price_change:+,.4f}* (Threshold: {format_price(step_interval)})\n"
                         f"Previous Baseline: *{format_price(baseline_price)}*\n"
                         f"Current Price: *{format_price(current_price)}*\n"
                     )
-                    await application.bot.send_message(
-                        chat_id=TARGET_CHAT_ID,
-                        text=msg,
-                        parse_mode="Markdown"
-                    )
+                    await safe_send_markdown(application.bot, TARGET_CHAT_ID, msg)
                     logger.info(f"Step Alert Triggered: {symbol} moved by {price_change:+,.4f} (Baseline: {baseline_price} -> {current_price})")
 
             # 5. Check YTD average alerts (dynamic relative to today's open price starting point)
@@ -218,20 +221,18 @@ async def price_polling_loop(application: Application):
                     db.update_average_alert_triggered(symbol, metric_type)
 
                     user_sym = symbol_to_user.get(symbol, symbol)
+                    safe_user_sym = user_sym.replace('_', '\\_')
+                    safe_sym = symbol.replace('_', '\\_')
                     msg = (
                         f"🚨 *Crypto YTD Average Alert* 🚨\n\n"
-                        f"Asset: *{user_sym}* ({symbol})\n"
+                        f"Asset: *{safe_user_sym}* ({safe_sym})\n"
                         f"Metric Triggered: *{metric_type}* Average Crossed/Reached\n"
                         f"Today's Start (Open): *{format_price(open_price)}*\n"
                         f"Today's Expected Target: *{format_price(val)}*\n"
                         f"Current Price: *{format_price(current_price)}*\n"
                         f"Cooldown: 1-hour initiated."
                     )
-                    await application.bot.send_message(
-                        chat_id=TARGET_CHAT_ID,
-                        text=msg,
-                        parse_mode="Markdown"
-                    )
+                    await safe_send_markdown(application.bot, TARGET_CHAT_ID, msg)
                     logger.info(f"Average Alert Triggered: {symbol} {metric_type} (Price: {current_price}, Open: {open_price}, Target: {val})")
 
             # 6. Check recurring price updates
@@ -262,6 +263,8 @@ async def price_polling_loop(application: Application):
                     # Update database with current price and last pushed time
                     db.update_recurring_update_last_pushed(symbol, current_price)
                     user_sym = symbol_to_user.get(symbol, symbol)
+                    safe_user_sym = user_sym.replace('_', '\\_')
+                    safe_sym = symbol.replace('_', '\\_')
                     
                     prev_price = r["last_price"]
                     if prev_price is not None and prev_price > 0:
@@ -274,16 +277,12 @@ async def price_polling_loop(application: Application):
 
                     msg = (
                         f"⏰ *Crypto Price Update* ⏰\n\n"
-                        f"Asset: *{user_sym}* ({symbol})\n"
+                        f"Asset: *{safe_user_sym}* ({safe_sym})\n"
                         f"Current Price: *{format_price(current_price)}*\n"
                         f"{comparison_str}"
                         f"Interval: Every *{interval_minutes}* min\n"
                     )
-                    await application.bot.send_message(
-                        chat_id=TARGET_CHAT_ID,
-                        text=msg,
-                        parse_mode="Markdown"
-                    )
+                    await safe_send_markdown(application.bot, TARGET_CHAT_ID, msg)
                     logger.info(f"Recurring Price Push Triggered: {symbol} is {current_price} (Interval: {interval_minutes} min, Prev: {prev_price})")
 
             # Update last prices cache in memory

@@ -7,6 +7,7 @@ load_dotenv(dotenv_path=os.path.join(os.path.dirname(os.path.abspath(__file__)),
 import httpx
 import logging
 import datetime
+import html
 from typing import List, Dict, Any, Optional
 
 import db
@@ -67,15 +68,26 @@ def format_pump_alert(
     """
     Formats a sleek, creative Telegram alert caption highlighting:
     - CryptoPulse VIP Bot
-    - PUMP ALERT
+    - PUMP or DUMP ALERT
     - Currency pair
     - 24h Change
     """
-    pct_str = f"+{current_pct:.2f}%" if current_pct >= 0 else f"{current_pct:.2f}%"
-    return (
-        f"⚡ <b>CryptoPulse VIP Bot</b>\n"
-        f"<blockquote>🚨 <b>PUMP ALERT:</b> <b>#{symbol}</b> ➔ <code>{pct_str}</code> 🟢</blockquote>"
-    )
+    esc_sym = html.escape(symbol)
+    if current_pct < 0:
+        pct_str = f"{current_pct:.2f}%"
+        return (
+            f"⚡ <b>CryptoPulse VIP Bot</b>\n"
+            f"<blockquote>🔻 <b>DUMP ALERT: #{esc_sym}</b> ➔ <code>{pct_str}</code> 🔴</blockquote>"
+        )
+    else:
+        pct_str = f"+{current_pct:.2f}%"
+        return (
+            f"⚡ <b>CryptoPulse VIP Bot</b>\n"
+            f"<blockquote>🚨 <b>PUMP ALERT: #{esc_sym}</b> ➔ <code>{pct_str}</code> 🟢</blockquote>"
+        )
+
+# Backward compatibility alias
+format_dump_alert = format_pump_alert
 
 
 async def fetch_24h_tickers() -> List[dict]:
@@ -110,7 +122,7 @@ def filter_gainers(tickers: List[dict], min_percent: float) -> List[dict]:
             pct_change = float(t.get("priceChangePercent", 0.0))
             quote_volume = float(t.get("quoteVolume", 0.0))
             
-            # Enforce 50% gain threshold (or configurable threshold) and liquid volume > $100k USDT
+            # Enforce gain threshold and liquid volume > $100k USDT
             if pct_change >= min_percent and quote_volume >= 100000.0:
                 gainers.append({
                     "symbol": symbol,
@@ -127,6 +139,40 @@ def filter_gainers(tickers: List[dict], min_percent: float) -> List[dict]:
     # Sort descending by change percentage
     gainers.sort(key=lambda x: x["priceChangePercent"], reverse=True)
     return gainers
+
+def filter_losers(tickers: List[dict], min_drop_percent: float) -> List[dict]:
+    """
+    Filters ticker lists for USDT trading pairs that meet minimum drop percentage 
+    (e.g. drop >= 30%) and daily quote volume (> $100k USDT) requirements.
+    Sorted ascending by change percentage (biggest drops first).
+    """
+    threshold_neg = -abs(min_drop_percent)
+    losers = []
+    for t in tickers:
+        symbol = t.get("symbol", "")
+        if not symbol.endswith("USDT"):
+            continue
+            
+        try:
+            pct_change = float(t.get("priceChangePercent", 0.0))
+            quote_volume = float(t.get("quoteVolume", 0.0))
+            
+            if pct_change <= threshold_neg and quote_volume >= 100000.0:
+                losers.append({
+                    "symbol": symbol,
+                    "lastPrice": float(t.get("lastPrice", 0.0)),
+                    "priceChangePercent": pct_change,
+                    "volume": float(t.get("volume", 0.0)),
+                    "quoteVolume": quote_volume,
+                    "highPrice": float(t.get("highPrice", 0.0)),
+                    "lowPrice": float(t.get("lowPrice", 0.0))
+                })
+        except (ValueError, TypeError):
+            continue
+            
+    # Sort ascending so the worst dumps (-50%, -40%, etc.) appear first
+    losers.sort(key=lambda x: x["priceChangePercent"])
+    return losers
 
 def get_milestone_tier(pct: float, threshold: float) -> int:
     """
@@ -148,6 +194,27 @@ def get_milestone_tier(pct: float, threshold: float) -> int:
     else:
         return 4 + int((pct - 150.0) // 50.0)
 
+def get_dump_milestone_tier(pct: float, threshold: float) -> int:
+    """
+    Groups dump drop percentages into milestone tiers:
+    - Tier 1: threshold <= drop < 40%
+    - Tier 2: 40% <= drop < 50%
+    - Tier 3: 50% <= drop < 60%
+    - Tier 4+: Step of 10% increment thereafter
+    """
+    drop = abs(pct) if pct < 0 else 0.0
+    thresh = abs(threshold)
+    if drop < thresh:
+        return 0
+    if drop < 40.0:
+        return 1
+    elif drop < 50.0:
+        return 2
+    elif drop < 60.0:
+        return 3
+    else:
+        return 4 + int((drop - 60.0) // 10.0)
+
 async def run_gainer_scanner(application: Any):
     """
     Periodic background job executing every 5 minutes to scan USDT market tickers 
@@ -158,13 +225,18 @@ async def run_gainer_scanner(application: Any):
     if enabled != "1":
         return
 
-    # 2. Get active alert threshold
+    # 2. Get active alert thresholds
     try:
         threshold = float(db.get_setting("gainer_threshold", "50.0"))
     except ValueError:
         threshold = 50.0
 
-    logger.info(f"Running market-wide 24h pump scanner (threshold: {threshold}%)...")
+    try:
+        dump_threshold = float(db.get_setting("dump_threshold", "30.0"))
+    except ValueError:
+        dump_threshold = 30.0
+
+    logger.info(f"Running market-wide 24h radar scanner (gainer threshold: +{threshold}%, dump threshold: -{dump_threshold}%)...")
     
     tickers = await fetch_24h_tickers()
     if not tickers:
@@ -172,11 +244,11 @@ async def run_gainer_scanner(application: Any):
         return
 
     gainers = filter_gainers(tickers, threshold)
-    if not gainers:
-        return
+    losers = filter_losers(tickers, dump_threshold)
 
     now = datetime.datetime.now(datetime.timezone.utc)
 
+    # --- 1. Process 24h Momentum Surge Gainers ---
     for g in gainers:
         symbol = g["symbol"]
         current_pct = g["priceChangePercent"]
@@ -213,10 +285,10 @@ async def run_gainer_scanner(application: Any):
                 should_alert = True
 
         if should_alert:
-            # 3. Log alert in database to trigger cooldown tracker
+            # Log alert in database to trigger cooldown tracker
             alert_id = db.insert_gainer_alert(symbol, current_pct, current_price)
 
-            # 4. Generate combined VIP alert card + chart and dispatch alert to Target Channel
+            # Generate combined VIP alert card + chart and dispatch alert to Target Channel
             card_bytes, multiplier = await card_service.generate_combined_alert(
                 symbol=symbol,
                 current_pct=current_pct,
@@ -262,9 +334,14 @@ async def run_gainer_scanner(application: Any):
                     )
                     logger.info(f"Sent fallback text pump alert for {symbol} (+{current_pct:.1f}%)")
                 except Exception as fe:
-                    logger.error(f"Failed fallback pump alert for {symbol}: {fe}")
+                    logger.warning(f"Failed fallback HTML pump alert for {symbol}: {fe}. Retrying plain text...")
+                    try:
+                        clean_text = msg.replace('<b>', '').replace('</b>', '').replace('<code>', '').replace('</code>', '').replace('<blockquote>', '').replace('</blockquote>', '')
+                        await application.bot.send_message(chat_id=TARGET_CHAT_ID, text=clean_text)
+                    except Exception as pte:
+                        logger.error(f"Failed plain text pump alert for {symbol}: {pte}")
 
-            # 5. Run Mean Reversion Short Analyst signal evaluation
+            # Run Mean Reversion Short Analyst signal evaluation
             try:
                 import analyst_service
                 eval_data = {
@@ -282,11 +359,112 @@ async def run_gainer_scanner(application: Any):
                 if decision == "ENTER_SHORT":
                     short_alert_msg = eval_result.get("telegram_alert")
                     if short_alert_msg:
-                        await application.bot.send_message(
-                            chat_id=TARGET_CHAT_ID,
-                            text=short_alert_msg,
-                            parse_mode="Markdown"
-                        )
-                        logger.info(f"Dispatched trade short signal alert for {symbol} to Telegram.")
+                        try:
+                            await application.bot.send_message(
+                                chat_id=TARGET_CHAT_ID,
+                                text=short_alert_msg,
+                                parse_mode="Markdown"
+                            )
+                            logger.info(f"Dispatched trade short signal alert for {symbol} to Telegram.")
+                        except Exception as sme:
+                            logger.warning(f"Markdown send failed for short alert ({sme}), falling back to plain text...")
+                            clean_short = short_alert_msg.replace('*', '').replace('`', '').replace('_', '')
+                            await application.bot.send_message(
+                                chat_id=TARGET_CHAT_ID,
+                                text=clean_short
+                            )
             except Exception as ae:
                 logger.error(f"Failed to run short analyst evaluation or send alert for {symbol}: {ae}", exc_info=True)
+
+    # --- 2. Process 24h Downside Crash Losers ---
+    for l in losers:
+        symbol = l["symbol"]
+        current_pct = l["priceChangePercent"]
+        current_price = l["lastPrice"]
+        high_24h = l["highPrice"]
+        low_24h = l["lowPrice"]
+        volume_24h = l["quoteVolume"]
+
+        # Check last dump alert history in DB
+        last_alert = db.get_last_dump_alert(symbol)
+        should_alert = False
+
+        if not last_alert:
+            should_alert = True
+        else:
+            try:
+                alerted_at = datetime.datetime.fromisoformat(last_alert["alerted_at"])
+                if alerted_at.tzinfo is None:
+                    alerted_at = alerted_at.replace(tzinfo=datetime.timezone.utc)
+                
+                hours_since = (now - alerted_at).total_seconds() / 3600.0
+                
+                if hours_since >= 4.0:
+                    should_alert = True
+                else:
+                    # Within 4 hours, alert only if the coin drops into a deeper milestone tier
+                    last_tier = get_dump_milestone_tier(last_alert["price_change_pct"], dump_threshold)
+                    current_tier = get_dump_milestone_tier(current_pct, dump_threshold)
+                    if current_tier > last_tier:
+                        should_alert = True
+                        logger.info(f"{symbol} reached deeper dump tier: Tier {last_tier} -> Tier {current_tier}")
+            except Exception as e:
+                logger.error(f"Error checking dump cooldown for {symbol}: {e}")
+                should_alert = True
+
+        if should_alert:
+            # Log dump alert in database to trigger cooldown tracker
+            alert_id = db.insert_dump_alert(symbol, current_pct, current_price)
+
+            # Generate combined VIP dump alert card + chart and dispatch alert to Target Channel
+            card_bytes, multiplier = await card_service.generate_combined_alert(
+                symbol=symbol,
+                current_pct=current_pct,
+                current_price=current_price,
+                high_24h=high_24h,
+                low_24h=low_24h,
+                volume_24h=volume_24h
+            )
+
+            msg = format_pump_alert(
+                symbol=symbol,
+                current_pct=current_pct,
+                current_price=current_price,
+                high_24h=high_24h,
+                low_24h=low_24h,
+                volume_24h=volume_24h,
+                multiplier=multiplier
+            )
+
+            try:
+                if card_bytes:
+                    await application.bot.send_photo(
+                        chat_id=TARGET_CHAT_ID,
+                        photo=card_bytes,
+                        caption=msg,
+                        parse_mode="HTML"
+                    )
+                    logger.info(f"Sent 24h VIP dump alert card to Telegram for {symbol} ({current_pct:.1f}%)")
+                else:
+                    await application.bot.send_message(
+                        chat_id=TARGET_CHAT_ID,
+                        text=msg,
+                        parse_mode="HTML"
+                    )
+                    logger.info(f"Sent 24h dump alert text to Telegram for {symbol} ({current_pct:.1f}%)")
+            except Exception as e:
+                logger.error(f"Failed to send dump alert with photo for {symbol}: {e}. Trying text fallback...")
+                try:
+                    await application.bot.send_message(
+                        chat_id=TARGET_CHAT_ID,
+                        text=msg,
+                        parse_mode="HTML"
+                    )
+                    logger.info(f"Sent fallback text dump alert for {symbol} ({current_pct:.1f}%)")
+                except Exception as fe:
+                    logger.warning(f"Failed fallback HTML dump alert for {symbol}: {fe}. Retrying plain text...")
+                    try:
+                        clean_text = msg.replace('<b>', '').replace('</b>', '').replace('<code>', '').replace('</code>', '').replace('<blockquote>', '').replace('</blockquote>', '')
+                        await application.bot.send_message(chat_id=TARGET_CHAT_ID, text=clean_text)
+                    except Exception as pte:
+                        logger.error(f"Failed plain text dump alert for {symbol}: {pte}")

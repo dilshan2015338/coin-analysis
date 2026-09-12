@@ -85,10 +85,11 @@ def render_pump_card(
 ) -> io.BytesIO:
     """
     Renders the institutional, dark-themed CryptoPulse VIP alert card as a PNG image.
-    Matches the sleek dark card aesthetic with neon green accents, glowing indicators,
-    2x2 metric tiles, and NO alert count.
+    Supports both PUMP (neon green) and DUMP (crimson red) alerts dynamically.
     """
     width, height = 940, 520
+
+    is_dump = current_pct < 0
 
     # Color Palette
     bg_color = (11, 17, 24, 255)       # Outer frame: #0B1118
@@ -98,11 +99,27 @@ def render_pump_card(
     tile_bg = (23, 35, 49, 255)        # Metric tiles: #172331
     tile_border = (30, 45, 61, 255)    # Tile border: #1E2D3D
 
-    neon_green = (0, 230, 118, 255)    # Accent green: #00E676
+    # Dynamic Theme Colors: Crimson/Red for Dump, Emerald for Pump
+    if is_dump:
+        accent_color = (255, 82, 82, 255)    # #FF5252
+        badge_bg = (51, 13, 20, 255)         # #330D14
+        header_color = (255, 82, 82, 255)
+        banner_title = "DUMP ALERT: 24h Downside Crash"
+        chart_icon = "chart_down"
+        circle_icon = "red_circle"
+        footer_text = "• Massive Downside Momentum · Oversold Watch"
+    else:
+        accent_color = (0, 230, 118, 255)    # #00E676
+        badge_bg = (13, 51, 40, 255)         # #0D3328
+        header_color = (0, 230, 118, 255)
+        banner_title = "PUMP ALERT: 24h Momentum Surge"
+        chart_icon = "chart_up"
+        circle_icon = "green_circle"
+        footer_text = "• High Momentum Runner · Enter Bet"
+
     cyan_blue = (56, 189, 248, 255)    # Coin highlight: #38BDF8
     text_white = (248, 250, 252, 255)  # Heading / values: #F8FAFC
     text_muted = (148, 163, 184, 255)  # Labels / muted: #94A3B8
-    bot_badge_bg = (13, 51, 40, 255)   # Bot pill bg: #0D3328
 
     img = Image.new("RGBA", (width, height), bg_color)
     draw = ImageDraw.Draw(img)
@@ -135,16 +152,16 @@ def render_pump_card(
         if ico:
             img.alpha_composite(ico, (x, y))
 
-    # 1. Header: "CryptoPulse VIP Bot" [BOT] (Alert count removed)
+    # 1. Header: "CryptoPulse VIP Bot" [BOT]
     header_x = card_x0 + 30
     header_y = card_y0 + 26
-    draw.text((header_x, header_y), "CryptoPulse VIP Bot", font=f_title, fill=neon_green)
+    draw.text((header_x, header_y), "CryptoPulse VIP Bot", font=f_title, fill=header_color)
 
     title_w = draw.textlength("CryptoPulse VIP Bot", font=f_title)
     badge_x = int(header_x + title_w + 12)
     badge_y = header_y + 4
-    draw.rounded_rectangle([badge_x, badge_y, badge_x + 44, badge_y + 20], radius=6, fill=bot_badge_bg)
-    draw.text((badge_x + 9, badge_y + 3), "BOT", font=f_badge, fill=neon_green)
+    draw.rounded_rectangle([badge_x, badge_y, badge_x + 44, badge_y + 20], radius=6, fill=badge_bg)
+    draw.text((badge_x + 9, badge_y + 3), "BOT", font=f_badge, fill=accent_color)
 
     # 2. Callout / Alert Banner
     banner_x0 = card_x0 + 30
@@ -153,18 +170,17 @@ def render_pump_card(
     banner_y1 = banner_y0 + 78
     draw.rounded_rectangle([banner_x0, banner_y0, banner_x1, banner_y1], radius=12, fill=banner_bg)
 
-    # Neon green accent strip on left
-    draw.rounded_rectangle([banner_x0, banner_y0, banner_x0 + 4, banner_y1], radius=2, fill=neon_green)
+    # Accent strip on left
+    draw.rounded_rectangle([banner_x0, banner_y0, banner_x0 + 4, banner_y1], radius=2, fill=accent_color)
 
     # Banner header text with sirens
     siren_size = 20
     paste_icon("siren", banner_x0 + 18, banner_y0 + 14, siren_size)
-    banner_h_text = "PUMP ALERT: 24h Momentum Surge"
-    draw.text((banner_x0 + 18 + siren_size + 8, banner_y0 + 14), banner_h_text, font=f_banner_h, fill=text_white)
-    h_w = draw.textlength(banner_h_text, font=f_banner_h)
+    draw.text((banner_x0 + 18 + siren_size + 8, banner_y0 + 14), banner_title, font=f_banner_h, fill=text_white)
+    h_w = draw.textlength(banner_title, font=f_banner_h)
     paste_icon("siren", int(banner_x0 + 18 + siren_size + 8 + h_w + 8), banner_y0 + 14, siren_size)
 
-    # Banner subtext: Pair: #SYMBOL · Top Gainer Radar
+    # Banner subtext: Pair: #SYMBOL · Top Gainer / Loser Radar
     sub_y = banner_y0 + 45
     pair_str = "Pair: "
     draw.text((banner_x0 + 18, sub_y), pair_str, font=f_banner_sub, fill=text_muted)
@@ -174,7 +190,8 @@ def render_pump_card(
     draw.text((int(banner_x0 + 18 + p_w), sub_y), coin_str, font=f_banner_coin, fill=cyan_blue)
     c_w = draw.textlength(coin_str, font=f_banner_coin)
 
-    draw.text((int(banner_x0 + 18 + p_w + c_w), sub_y), " · Top Gainer Radar", font=f_banner_sub, fill=text_muted)
+    radar_tag = " · Top Loser Radar" if is_dump else " · Top Gainer Radar"
+    draw.text((int(banner_x0 + 18 + p_w + c_w), sub_y), radar_tag, font=f_banner_sub, fill=text_muted)
 
     # 3. 2x2 Metric Grid
     grid_y0 = banner_y1 + 18
@@ -187,13 +204,13 @@ def render_pump_card(
     t1_x0 = banner_x0
     t1_y0 = grid_y0
     draw.rounded_rectangle([t1_x0, t1_y0, t1_x0 + tile_w, t1_y0 + tile_h], radius=12, fill=tile_bg, outline=tile_border, width=1)
-    paste_icon("chart_up", t1_x0 + 20, t1_y0 + 18, icon_sm)
+    paste_icon(chart_icon, t1_x0 + 20, t1_y0 + 18, icon_sm)
     draw.text((t1_x0 + 20 + icon_sm + 8, t1_y0 + 18), "24h Change", font=f_label, fill=text_muted)
 
-    pct_text = f"+{current_pct:.2f}%" if current_pct >= 0 else f"{current_pct:.2f}%"
-    draw.text((t1_x0 + 20, t1_y0 + 52), pct_text, font=f_val_large, fill=neon_green)
+    pct_text = f"{current_pct:.2f}%" if is_dump else f"+{current_pct:.2f}%"
+    draw.text((t1_x0 + 20, t1_y0 + 52), pct_text, font=f_val_large, fill=accent_color)
     pct_w = draw.textlength(pct_text, font=f_val_large)
-    paste_icon("green_circle", int(t1_x0 + 20 + pct_w + 12), t1_y0 + 55, 22)
+    paste_icon(circle_icon, int(t1_x0 + 20 + pct_w + 12), t1_y0 + 55, 22)
 
     # --- Tile 2: Current Price ---
     t2_x0 = t1_x0 + tile_w + gap
@@ -232,16 +249,19 @@ def render_pump_card(
     draw.text((t4_x0 + 20, t4_y0 + 56), vol_text, font=f_val_med, fill=text_white)
     if multiplier and multiplier >= 1.2:
         v_w = draw.textlength(vol_text, font=f_val_med)
-        draw.text((int(t4_x0 + 20 + v_w + 8), t4_y0 + 56), f"({multiplier:.1f}x)", font=f_val_med, fill=neon_green)
+        draw.text((int(t4_x0 + 20 + v_w + 8), t4_y0 + 56), f"({multiplier:.1f}x)", font=f_val_med, fill=accent_color)
 
     # 4. Footer
     footer_y = card_y1 - 32
-    draw.text((banner_x0, footer_y), "• High Momentum Runner · Enter Bet", font=f_footer, fill=neon_green)
+    draw.text((banner_x0, footer_y), footer_text, font=f_footer, fill=accent_color)
 
     buf = io.BytesIO()
     img.save(buf, format="PNG", optimize=True)
     buf.seek(0)
     return buf
+
+# Backward compatibility alias
+render_dump_card = render_pump_card
 
 async def generate_vip_card(
     symbol: str,

@@ -124,6 +124,17 @@ def init_db():
             );
         """)
 
+        # Create dump_alerts_history table
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS dump_alerts_history (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                symbol TEXT NOT NULL,
+                price_change_pct REAL NOT NULL,
+                price_at_alert REAL NOT NULL,
+                alerted_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            );
+        """)
+
         # Create settings table
         conn.execute("""
             CREATE TABLE IF NOT EXISTS settings (
@@ -151,6 +162,7 @@ def init_db():
 
         # Insert default settings if they don't exist
         conn.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('gainer_threshold', '50.0');")
+        conn.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('dump_threshold', '30.0');")
         conn.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('gainer_scanner_enabled', '1');")
         conn.commit()
 
@@ -444,6 +456,27 @@ def insert_gainer_alert(symbol: str, price_change_pct: float, price_at_alert: fl
     with get_connection() as conn:
         cursor = conn.execute(
             "INSERT INTO gainer_alerts_history (symbol, price_change_pct, price_at_alert, alerted_at) VALUES (?, ?, ?, ?);",
+            (symbol, price_change_pct, price_at_alert, now_str)
+        )
+        conn.commit()
+        return cursor.lastrowid
+
+def get_last_dump_alert(symbol: str) -> Optional[Dict[str, Any]]:
+    """Retrieves the most recent dump alert for a symbol from dump_alerts_history."""
+    with get_connection() as conn:
+        cursor = conn.execute(
+            "SELECT price_change_pct, price_at_alert, alerted_at FROM dump_alerts_history WHERE symbol = ? ORDER BY alerted_at DESC LIMIT 1;",
+            (symbol,)
+        )
+        row = cursor.fetchone()
+        return dict(row) if row else None
+
+def insert_dump_alert(symbol: str, price_change_pct: float, price_at_alert: float) -> int:
+    """Inserts a new dump alert record with timezone-aware timestamp string and returns the alert ID."""
+    now_str = datetime.datetime.now(datetime.timezone.utc).isoformat()
+    with get_connection() as conn:
+        cursor = conn.execute(
+            "INSERT INTO dump_alerts_history (symbol, price_change_pct, price_at_alert, alerted_at) VALUES (?, ?, ?, ?);",
             (symbol, price_change_pct, price_at_alert, now_str)
         )
         conn.commit()

@@ -5,6 +5,7 @@ from dotenv import load_dotenv
 load_dotenv(dotenv_path=os.path.join(os.path.dirname(os.path.abspath(__file__)), '.env'))
 
 import logging
+import html
 from typing import Any
 from telegram import Update
 from telegram.ext import ContextTypes
@@ -627,7 +628,7 @@ async def handle_admin_message(update: Update, context: ContextTypes.DEFAULT_TYP
                 except ValueError:
                     min_percent = 50.0
                     
-            status_msg = await msg.reply_text(f"⏳ Scanning Binance 24h market stats for pairs >= <b>{min_percent:.0f}%</b> gain...", parse_mode="HTML")
+            status_msg = await msg.reply_text(f"⏳ Scanning Binance 24h market stats for pairs ≥ <b>{min_percent:.0f}%</b> gain...", parse_mode="HTML")
             
             tickers = await gainer_service.fetch_24h_tickers()
             if not tickers:
@@ -636,7 +637,7 @@ async def handle_admin_message(update: Update, context: ContextTypes.DEFAULT_TYP
 
             gainers = gainer_service.filter_gainers(tickers, min_percent)
             if not gainers:
-                await status_msg.edit_text(f"ℹ️ No USDT trading pairs currently meet the >= <b>{min_percent:.0f}%</b> gain criteria.", parse_mode="HTML")
+                await status_msg.edit_text(f"ℹ️ No USDT trading pairs currently meet the ≥ <b>{min_percent:.0f}%</b> gain criteria.", parse_mode="HTML")
                 return
 
             # Display top 15
@@ -644,7 +645,7 @@ async def handle_admin_message(update: Update, context: ContextTypes.DEFAULT_TYP
             response = (
                 f"⚡ <b>CryptoPulse VIP | 24h Top Gainers</b> ⚡\n"
                 f"━━━━━━━━━━━━━━━━━━━━━\n"
-                f"🔥 <i>Pairs with &gt;={min_percent:.0f}% rolling 24h momentum</i>\n\n"
+                f"🔥 <i>Pairs with ≥{min_percent:.0f}% rolling 24h momentum</i>\n\n"
             )
             for g in top_gainers:
                 sym = g["symbol"]
@@ -659,6 +660,50 @@ async def handle_admin_message(update: Update, context: ContextTypes.DEFAULT_TYP
             response += (
                 f"\n━━━━━━━━━━━━━━━━━━━━━\n"
                 f"💡 <i>Tip: Type <code>/chart &lt;symbol&gt;</code> to view the momentum candlestick chart!</i>"
+            )
+                
+            await status_msg.edit_text(response, parse_mode="HTML")
+
+        elif cmd_type == "losers":
+            min_drop = command["min_percent"]
+            if min_drop is None:
+                try:
+                    min_drop = float(db.get_setting("dump_threshold", "30.0"))
+                except ValueError:
+                    min_drop = 30.0
+                    
+            status_msg = await msg.reply_text(f"⏳ Scanning Binance 24h market stats for pairs ≤ <b>-{min_drop:.0f}%</b> drop...", parse_mode="HTML")
+            
+            tickers = await gainer_service.fetch_24h_tickers()
+            if not tickers:
+                await status_msg.edit_text("❌ Failed to fetch market stats from Binance.", parse_mode="HTML")
+                return
+
+            losers = gainer_service.filter_losers(tickers, min_drop)
+            if not losers:
+                await status_msg.edit_text(f"ℹ️ No USDT trading pairs currently meet the ≤ <b>-{min_drop:.0f}%</b> drop criteria.", parse_mode="HTML")
+                return
+
+            # Display top 15
+            top_losers = losers[:15]
+            response = (
+                f"⚡ <b>CryptoPulse VIP | 24h Top Losers</b> ⚡\n"
+                f"━━━━━━━━━━━━━━━━━━━━━\n"
+                f"🔻 <i>Pairs with ≥{min_drop:.0f}% rolling 24h downside crash</i>\n\n"
+            )
+            for l in top_losers:
+                sym = l["symbol"]
+                change = l["priceChangePercent"]
+                price = l["lastPrice"]
+                vol = l["quoteVolume"]
+                response += f"• <b>#{sym}</b>: <code>{change:.2f}%</code> 🔴 | <code>{gainer_service.format_price(price)}</code> | Vol: <code>{gainer_service.format_volume(vol)}</code>\n"
+                
+            if len(losers) > 15:
+                response += f"\n<i>(showing top 15 out of {len(losers)} total losers dropped ≥{min_drop:.0f}%)</i>\n"
+                
+            response += (
+                f"\n━━━━━━━━━━━━━━━━━━━━━\n"
+                f"💡 <i>Tip: Type <code>/dump &lt;symbol&gt;</code> to view the VIP dump alert card!</i>"
             )
                 
             await status_msg.edit_text(response, parse_mode="HTML")
@@ -704,7 +749,6 @@ async def handle_admin_message(update: Update, context: ContextTypes.DEFAULT_TYP
                     multiplier=multiplier
                 )
 
-                await status_msg.delete()
                 if card_bytes:
                     await msg.reply_photo(
                         photo=card_bytes,
@@ -713,9 +757,76 @@ async def handle_admin_message(update: Update, context: ContextTypes.DEFAULT_TYP
                     )
                 else:
                     await msg.reply_text(card_caption, parse_mode="HTML")
+                try:
+                    await status_msg.delete()
+                except Exception:
+                    pass
             except Exception as e:
                 logger.error(f"Error handling pump_card command for {resolved}: {e}", exc_info=True)
-                await status_msg.edit_text(f"❌ Error generating VIP card for <b>#{resolved}</b>: {str(e)}", parse_mode="HTML")
+                try:
+                    await status_msg.edit_text(f"❌ Error generating VIP card for <b>#{html.escape(resolved)}</b>: {html.escape(str(e))}", parse_mode="HTML")
+                except Exception:
+                    await msg.reply_text(f"❌ Error generating VIP card for #{resolved}: {html.escape(str(e))}")
+
+        elif cmd_type == "dump_card":
+            import card_service
+            import httpx
+            user_symbol = command["symbol"]
+            resolved = price_fetcher.resolve_symbol(user_symbol)
+
+            status_msg = await msg.reply_text(f"⏳ Generating VIP dump alert card for <b>#{resolved}</b>...", parse_mode="HTML")
+            try:
+                # Fetch 24h ticker for coin
+                async with httpx.AsyncClient() as client:
+                    resp = await client.get(f"https://api.binance.com/api/v3/ticker/24hr?symbol={resolved}", timeout=10.0)
+                    if resp.status_code != 200:
+                        await status_msg.edit_text(f"❌ Could not find 24h statistics for <b>#{resolved}</b> on Binance.", parse_mode="HTML")
+                        return
+                    d = resp.json()
+
+                current_pct = float(d.get("priceChangePercent", 0.0))
+                current_price = float(d.get("lastPrice", 0.0))
+                high_24h = float(d.get("highPrice", 0.0))
+                low_24h = float(d.get("lowPrice", 0.0))
+                volume_24h = float(d.get("quoteVolume", 0.0))
+
+                card_bytes, multiplier = await card_service.generate_combined_alert(
+                    symbol=resolved,
+                    current_pct=current_pct,
+                    current_price=current_price,
+                    high_24h=high_24h,
+                    low_24h=low_24h,
+                    volume_24h=volume_24h
+                )
+
+                card_caption = gainer_service.format_pump_alert(
+                    symbol=resolved,
+                    current_pct=current_pct,
+                    current_price=current_price,
+                    high_24h=high_24h,
+                    low_24h=low_24h,
+                    volume_24h=volume_24h,
+                    multiplier=multiplier
+                )
+
+                if card_bytes:
+                    await msg.reply_photo(
+                        photo=card_bytes,
+                        caption=card_caption,
+                        parse_mode="HTML"
+                    )
+                else:
+                    await msg.reply_text(card_caption, parse_mode="HTML")
+                try:
+                    await status_msg.delete()
+                except Exception:
+                    pass
+            except Exception as e:
+                logger.error(f"Error handling dump_card command for {resolved}: {e}", exc_info=True)
+                try:
+                    await status_msg.edit_text(f"❌ Error generating VIP card for <b>#{html.escape(resolved)}</b>: {html.escape(str(e))}", parse_mode="HTML")
+                except Exception:
+                    await msg.reply_text(f"❌ Error generating VIP card for #{resolved}: {html.escape(str(e))}")
 
         elif cmd_type == "pump_chart":
             import chart_service
@@ -758,7 +869,6 @@ async def handle_admin_message(update: Update, context: ContextTypes.DEFAULT_TYP
                     multiplier=multiplier
                 )
 
-                await status_msg.delete()
                 if chart_bytes:
                     await msg.reply_photo(
                         photo=chart_bytes,
@@ -767,16 +877,23 @@ async def handle_admin_message(update: Update, context: ContextTypes.DEFAULT_TYP
                     )
                 else:
                     await msg.reply_text(card_caption, parse_mode="HTML")
+                try:
+                    await status_msg.delete()
+                except Exception:
+                    pass
             except Exception as e:
                 logger.error(f"Error handling pump_chart command for {resolved}: {e}", exc_info=True)
-                await status_msg.edit_text(f"❌ Error generating chart for <b>#{resolved}</b>: {str(e)}", parse_mode="HTML")
+                try:
+                    await status_msg.edit_text(f"❌ Error generating chart for <b>#{html.escape(resolved)}</b>: {html.escape(str(e))}", parse_mode="HTML")
+                except Exception:
+                    await msg.reply_text(f"❌ Error generating chart for #{resolved}: {html.escape(str(e))}")
 
         elif cmd_type == "test_pump":
             import card_service
             import gainer_service
             
-            raw_sym = command.get("symbol") or "TESTUSDT"
-            resolved = price_fetcher.resolve_symbol(raw_sym) if raw_sym != "TESTUSDT" else "TESTUSDT"
+            raw_sym = command.get("symbol") or "PNTUSDT"
+            resolved = price_fetcher.resolve_symbol(raw_sym) if not raw_sym.upper().startswith("TEST") else "TESTUSDT"
 
             status_msg = await msg.reply_text(f"🧪 Generating simulated VIP pump alert for <b>#{resolved}</b>...", parse_mode="HTML")
             try:
@@ -824,7 +941,6 @@ async def handle_admin_message(update: Update, context: ContextTypes.DEFAULT_TYP
                     multiplier=test_multiplier
                 )
 
-                await status_msg.delete()
                 if card_bytes:
                     await msg.reply_photo(
                         photo=card_bytes,
@@ -833,32 +949,150 @@ async def handle_admin_message(update: Update, context: ContextTypes.DEFAULT_TYP
                     )
                 else:
                     await msg.reply_text(card_caption, parse_mode="HTML")
+                try:
+                    await status_msg.delete()
+                except Exception:
+                    pass
 
                 # Dispatch test copy to TARGET_CHAT_ID to test end-to-end integration
                 target_chat = gainer_service.TARGET_CHAT_ID
                 if target_chat and target_chat != msg.chat.id:
                     try:
-                        card_bytes.seek(0)
-                        await context.bot.send_photo(
-                            chat_id=target_chat,
-                            photo=card_bytes,
-                            caption=card_caption,
-                            parse_mode="HTML"
-                        )
+                        if card_bytes:
+                            card_bytes.seek(0)
+                            await context.bot.send_photo(
+                                chat_id=target_chat,
+                                photo=card_bytes,
+                                caption=card_caption,
+                                parse_mode="HTML"
+                            )
+                        else:
+                            await context.bot.send_message(
+                                chat_id=target_chat,
+                                text=card_caption,
+                                parse_mode="HTML"
+                            )
                         await msg.reply_text(f"✅ Successfully dispatched test pump alert to target channel (<code>{target_chat}</code>)!", parse_mode="HTML")
                     except Exception as te:
-                        await msg.reply_text(f"⚠️ Warning: Could not post to target channel (<code>{target_chat}</code>): <i>{str(te)}</i>", parse_mode="HTML")
+                        await msg.reply_text(f"⚠️ Warning: Could not post to target channel (<code>{target_chat}</code>): <i>{html.escape(str(te))}</i>", parse_mode="HTML")
 
             except Exception as e:
                 logger.error(f"Error executing test_pump command: {e}", exc_info=True)
-                await status_msg.edit_text(f"❌ Error generating test alert: {str(e)}", parse_mode="HTML")
+                try:
+                    await status_msg.edit_text(f"❌ Error generating test alert: {html.escape(str(e))}", parse_mode="HTML")
+                except Exception:
+                    await msg.reply_text(f"❌ Error generating test alert: {html.escape(str(e))}")
+
+        elif cmd_type == "test_dump":
+            import card_service
+            import gainer_service
+            
+            raw_sym = command.get("symbol") or "LUNAUSDT"
+            resolved = price_fetcher.resolve_symbol(raw_sym) if not raw_sym.upper().startswith("TEST") else "TESTUSDT"
+
+            status_msg = await msg.reply_text(f"🧪 Generating simulated VIP dump alert for <b>#{resolved}</b>...", parse_mode="HTML")
+            try:
+                test_pct = -34.50
+                test_price = 0.3850
+                test_high = 0.5890
+                test_low = 0.3620
+                test_vol = 85200000.0
+                test_multiplier = 2.7
+
+                if resolved != "TESTUSDT":
+                    try:
+                        import httpx
+                        async with httpx.AsyncClient() as client:
+                            resp = await client.get(f"https://api.binance.com/api/v3/ticker/24hr?symbol={resolved}", timeout=6.0)
+                            if resp.status_code == 200:
+                                d = resp.json()
+                                test_price = float(d.get("lastPrice", 0.0))
+                                test_high = float(d.get("highPrice", test_price * 1.45))
+                                test_low = float(d.get("lowPrice", test_price * 0.95))
+                                test_vol = float(d.get("quoteVolume", 1500000.0))
+                                real_pct = float(d.get("priceChangePercent", 0.0))
+                                test_pct = real_pct if real_pct <= -20.0 else -35.80
+                                test_multiplier = 2.5
+                    except Exception as fe:
+                        logger.debug(f"Ticker fetch failed for test {resolved}, using default test values: {fe}")
+
+                card_bytes, _ = await card_service.generate_combined_alert(
+                    symbol=resolved,
+                    current_pct=test_pct,
+                    current_price=test_price,
+                    high_24h=test_high,
+                    low_24h=test_low,
+                    volume_24h=test_vol,
+                    multiplier=test_multiplier
+                )
+
+                card_caption = gainer_service.format_pump_alert(
+                    symbol=resolved,
+                    current_pct=test_pct,
+                    current_price=test_price,
+                    high_24h=test_high,
+                    low_24h=test_low,
+                    volume_24h=test_vol,
+                    multiplier=test_multiplier
+                )
+
+                if card_bytes:
+                    await msg.reply_photo(
+                        photo=card_bytes,
+                        caption=card_caption,
+                        parse_mode="HTML"
+                    )
+                else:
+                    await msg.reply_text(card_caption, parse_mode="HTML")
+                try:
+                    await status_msg.delete()
+                except Exception:
+                    pass
+
+                # Dispatch test copy to TARGET_CHAT_ID to test end-to-end integration
+                target_chat = gainer_service.TARGET_CHAT_ID
+                if target_chat and target_chat != msg.chat.id:
+                    try:
+                        if card_bytes:
+                            card_bytes.seek(0)
+                            await context.bot.send_photo(
+                                chat_id=target_chat,
+                                photo=card_bytes,
+                                caption=card_caption,
+                                parse_mode="HTML"
+                            )
+                        else:
+                            await context.bot.send_message(
+                                chat_id=target_chat,
+                                text=card_caption,
+                                parse_mode="HTML"
+                            )
+                        await msg.reply_text(f"✅ Successfully dispatched test dump alert to target channel (<code>{target_chat}</code>)!", parse_mode="HTML")
+                    except Exception as te:
+                        await msg.reply_text(f"⚠️ Warning: Could not post to target channel (<code>{target_chat}</code>): <i>{html.escape(str(te))}</i>", parse_mode="HTML")
+
+            except Exception as e:
+                logger.error(f"Error executing test_dump command: {e}", exc_info=True)
+                try:
+                    await status_msg.edit_text(f"❌ Error generating test alert: {html.escape(str(e))}", parse_mode="HTML")
+                except Exception:
+                    await msg.reply_text(f"❌ Error generating test alert: {html.escape(str(e))}")
 
         elif cmd_type == "set_gainer_threshold":
             percent = command["percent"]
             db.set_setting("gainer_threshold", str(percent))
             response = (
                 f"✅ *Gainer Alert Threshold Updated!*\n\n"
-                f"Automatic scanner will now trigger for assets gaining *>{percent}%* in 24 hours."
+                f"Automatic scanner will now trigger for assets gaining *≥{percent:.0f}%* in 24 hours."
+            )
+            await msg.reply_text(response, parse_mode="Markdown")
+
+        elif cmd_type == "set_dump_threshold":
+            percent = abs(command["percent"])
+            db.set_setting("dump_threshold", str(percent))
+            response = (
+                f"✅ *Dump Alert Threshold Updated!*\n\n"
+                f"Automatic scanner will now trigger for assets dropping *≤-{percent:.0f}%* in 24 hours."
             )
             await msg.reply_text(response, parse_mode="Markdown")
 
@@ -867,7 +1101,7 @@ async def handle_admin_message(update: Update, context: ContextTypes.DEFAULT_TYP
             val = "1" if status == "ON" else "0"
             db.set_setting("gainer_scanner_enabled", val)
             response = (
-                f"✅ *Gainer Background Scanner Updated!*\n\n"
+                f"✅ *Gainer & Dump Background Scanner Updated!*\n\n"
                 f"Automatic scanning and notifications are now *{status}*."
             )
             await msg.reply_text(response, parse_mode="Markdown")
@@ -925,21 +1159,28 @@ async def handle_admin_message(update: Update, context: ContextTypes.DEFAULT_TYP
                 "Query local market analyzer for regime, microstructure, trade rec and predictions:\n"
                 "<code>/analyze BTC</code> or <code>/analysis ETH</code>\n"
                 "<i>(Alternative: <code>CONFIG ANALYZE BTC</code>)</i>\n\n"
-                "1️⃣3️⃣ <b>24h Gainer Scanner Settings</b>\n"
+                "1️⃣3️⃣ <b>24h Gainer & Dump Scanner Settings</b>\n"
                 "Get current top gainers list:\n"
                 "<code>/gainers</code> or <code>/gainers 30</code>\n"
+                "Get current top losers list:\n"
+                "<code>/losers</code> or <code>/losers 20</code>\n"
                 "Set automatic alert threshold percentage:\n"
                 "<code>/set_gainer_threshold 40</code>\n"
+                "<code>/set_dump_threshold 30</code>\n"
                 "Toggle background scanner ON or OFF:\n"
                 "<code>/gainer_scanner ON</code> or <code>/gainer_scanner OFF</code>\n\n"
-                "1️⃣4️⃣ <b>Momentum Breakout Chart & VIP Card</b>\n"
+                "1️⃣4️⃣ <b>VIP Alert Cards & Charts</b>\n"
                 "Generate live VIP pump alert card:\n"
-                "<code>/pump VTHO</code> or <code>/pump CREAMUSDT</code>\n"
-                "Generate live 15M momentum candlestick chart:\n"
-                "<code>/chart VTHO</code> or <code>/chart CREAMUSDT</code>\n\n"
-                "1️⃣5️⃣ <b>Test Alert Integration</b>\n"
+                "<code>/pump VTHO</code>\n"
+                "Generate live VIP dump alert card:\n"
+                "<code>/dump LUNA</code>\n"
+                "Generate live 15M candlestick breakdown chart:\n"
+                "<code>/chart VTHO</code> or <code>/chart LUNA</code>\n\n"
+                "1️⃣5️⃣ <b>Test Alert Integrations</b>\n"
                 "Simulate mock pump alert and test Telegram target channel integration:\n"
-                "<code>/test_pump</code> or <code>/test_pump BTC</code>\n\n"
+                "<code>/test_pump</code> or <code>/test_pump BTC</code>\n"
+                "Simulate mock dump alert and test Telegram target channel integration:\n"
+                "<code>/test_dump</code> or <code>/test_dump LUNA</code>\n\n"
                 "1️⃣6️⃣ <b>Help Instructions</b>\n"
                 "Display this help message:\n"
                 "<code>/help</code> or <code>/start</code>\n"
@@ -949,6 +1190,9 @@ async def handle_admin_message(update: Update, context: ContextTypes.DEFAULT_TYP
 
     except Exception as e:
         logger.error(f"Error handling admin command: {e}", exc_info=True)
-        await msg.reply_text(f"❌ *Error processing command:* {str(e)}", parse_mode="Markdown")
+        try:
+            await msg.reply_text(f"❌ Error processing command: {str(e)}")
+        except Exception as reply_err:
+            logger.error(f"Failed to reply with error message: {reply_err}")
 
 import asyncio
