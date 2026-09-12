@@ -80,3 +80,134 @@ async def fetch_prices(resolved_symbols: List[str]) -> Dict[str, float]:
             logger.warning(f"Price for symbol {sym} could not be found on Binance Spot or Futures.")
 
     return result
+
+# ---------------------------------------------------------
+# Market Type Resolver (Spot vs Futures)
+# ---------------------------------------------------------
+
+_SPOT_SYMBOLS: set = set()
+_FUTURES_SYMBOLS: set = set()
+_CACHE_TIMESTAMP: float = 0.0
+_CACHE_TTL: float = 900.0  # 15 minutes
+_CACHE_LOCK: Optional[asyncio.Lock] = None
+
+def _get_cache_lock() -> asyncio.Lock:
+    global _CACHE_LOCK
+    if _CACHE_LOCK is None:
+        _CACHE_LOCK = asyncio.Lock()
+    return _CACHE_LOCK
+
+async def refresh_market_cache(force: bool = False) -> None:
+    """
+    Refreshes the cached sets of Binance Spot and Futures tickers every 15 minutes.
+    """
+    import time
+    global _SPOT_SYMBOLS, _FUTURES_SYMBOLS, _CACHE_TIMESTAMP
+
+    now = time.time()
+    if not force and _SPOT_SYMBOLS and (now - _CACHE_TIMESTAMP < _CACHE_TTL):
+        return
+
+    lock = _get_cache_lock()
+    async with lock:
+        now = time.time()
+        if not force and _SPOT_SYMBOLS and (now - _CACHE_TIMESTAMP < _CACHE_TTL):
+            return
+
+        futures_url = "https://fapi.binance.com/fapi/v1/ticker/price"
+        spot_url = "https://api.binance.com/api/v3/ticker/price"
+
+        try:
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                f_task = client.get(futures_url)
+                s_task = client.get(spot_url)
+                f_res, s_res = await asyncio.gather(f_task, s_task, return_exceptions=True)
+
+                if not isinstance(s_res, Exception) and s_res.status_code == 200:
+                    _SPOT_SYMBOLS = {item["symbol"] for item in s_res.json() if "symbol" in item}
+                
+                if not isinstance(f_res, Exception) and f_res.status_code == 200:
+                    _FUTURES_SYMBOLS = {item["symbol"] for item in f_res.json() if "symbol" in item}
+
+                _CACHE_TIMESTAMP = time.time()
+                logger.info(f"Market cache refreshed: {len(_SPOT_SYMBOLS)} Spot symbols, {len(_FUTURES_SYMBOLS)} Futures symbols.")
+        except Exception as e:
+            logger.warning(f"Failed to refresh market cache: {e}")
+
+async def get_market_type(symbol: str) -> str:
+    """
+    Determines whether the cryptocurrency symbol is traded on Binance Spot, Binance Futures, or both.
+    Returns 'Spot & Futures', 'Futures', 'Spot', or 'Spot' default.
+    """
+    sym = resolve_symbol(symbol).upper()
+    if not sym:
+        return "Spot"
+
+    await refresh_market_cache()
+
+    in_spot = sym in _SPOT_SYMBOLS
+    in_fut = sym in _FUTURES_SYMBOLS
+
+    if in_spot and in_fut:
+        return "Spot & Futures"
+    elif in_fut:
+        return "Futures"
+    elif in_spot:
+        return "Spot"
+    return "Spot"
+
+def get_market_type_sync(symbol: str) -> str:
+    """
+    Synchronous fallback to determine market type from current cache.
+    If cache is empty, attempts a fast one-time sync fetch.
+    """
+    import time
+    sym = resolve_symbol(symbol).upper()
+    if not sym:
+        return "Spot"
+
+    global _SPOT_SYMBOLS, _FUTURES_SYMBOLS, _CACHE_TIMESTAMP
+    if not _SPOT_SYMBOLS and not _FUTURES_SYMBOLS:
+        try:
+            with httpx.Client(timeout=4.0) as client:
+                r_s = client.get("https://api.binance.com/api/v3/ticker/price")
+                r_f = client.get("https://fapi.binance.com/fapi/v1/ticker/price")
+                if r_s.status_code == 200:
+                    _SPOT_SYMBOLS = {item["symbol"] for item in r_s.json() if "symbol" in item}
+                if r_f.status_code == 200:
+                    _FUTURES_SYMBOLS = {item["symbol"] for item in r_f.json() if "symbol" in item}
+                _CACHE_TIMESTAMP = time.time()
+        except Exception as e:
+            logger.warning(f"Sync fallback market type lookup failed for {sym}: {e}")
+
+    in_spot = sym in _SPOT_SYMBOLS
+    in_fut = sym in _FUTURES_SYMBOLS
+
+    if in_spot and in_fut:
+        return "Spot & Futures"
+    elif in_fut:
+        return "Futures"
+    elif in_spot:
+        return "Spot"
+    return "Spot"
+
+async def is_futures_symbol(symbol: str) -> bool:
+    """
+    Returns True if the cryptocurrency symbol has active Futures contracts on Binance
+    (either as 'Futures' only or 'Spot & Futures').
+    """
+    sym = resolve_symbol(symbol).upper()
+    if not sym:
+        return False
+    await refresh_market_cache()
+    return sym in _FUTURES_SYMBOLS
+
+def is_futures_symbol_sync(symbol: str) -> bool:
+    """
+    Synchronous check whether a symbol is traded on Binance Futures.
+    """
+    sym = resolve_symbol(symbol).upper()
+    if not sym:
+        return False
+    return sym in _FUTURES_SYMBOLS
+

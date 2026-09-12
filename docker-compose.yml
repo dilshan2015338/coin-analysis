@@ -1,0 +1,17 @@
+services:
+  coin-analysis-bot:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: coin-analysis-bot
+    restart: unless-stopped
+    env_file:
+      - .env
+    volumes:
+      # Persist SQLite database on the host machine across container rebuilds
+      - ./alerts.db:/app/alerts.db
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"

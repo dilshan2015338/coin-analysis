@@ -1,19 +1,23 @@
 import os
-from dotenv import load_dotenv
-
-# Load environment variables
-load_dotenv(dotenv_path=os.path.join(os.path.dirname(os.path.abspath(__file__)), '.env'))
-
+import asyncio
 import logging
 import html
 from typing import Any
+import httpx
+from dotenv import load_dotenv
 from telegram import Update
 from telegram.ext import ContextTypes
+
+# Load environment variables
+load_dotenv(dotenv_path=os.path.join(os.path.dirname(os.path.abspath(__file__)), '.env'))
 
 import db
 import price_fetcher
 import kline_service
 import gainer_service
+import card_service
+import chart_service
+import analyst_service
 from config_parser import parse_message_command
 
 logger = logging.getLogger(__name__)
@@ -452,8 +456,6 @@ async def handle_admin_message(update: Update, context: ContextTypes.DEFAULT_TYP
                 await msg.reply_text(response, parse_mode="Markdown")
 
         elif cmd_type == "short_status":
-            import httpx
-            import analyst_service
             user_symbol = command["symbol"]
             resolved = price_fetcher.resolve_symbol(user_symbol)
             
@@ -502,7 +504,6 @@ async def handle_admin_message(update: Update, context: ContextTypes.DEFAULT_TYP
                 await status_msg.edit_text(f"❌ Error during evaluation of *{user_symbol}*: {str(e)}", parse_mode="Markdown")
 
         elif cmd_type == "analyze":
-            import httpx
             user_symbol = command["symbol"]
             resolved = price_fetcher.resolve_symbol(user_symbol)
 
@@ -628,24 +629,24 @@ async def handle_admin_message(update: Update, context: ContextTypes.DEFAULT_TYP
                 except ValueError:
                     min_percent = 50.0
                     
-            status_msg = await msg.reply_text(f"⏳ Scanning Binance 24h market stats for pairs ≥ <b>{min_percent:.0f}%</b> gain...", parse_mode="HTML")
+            status_msg = await msg.reply_text(f"⏳ Scanning Binance 24h Futures market stats for pairs ≥ <b>{min_percent:.0f}%</b> gain...", parse_mode="HTML")
             
-            tickers = await gainer_service.fetch_24h_tickers()
+            tickers = await gainer_service.fetch_24h_tickers(futures_priority=True)
             if not tickers:
                 await status_msg.edit_text("❌ Failed to fetch market stats from Binance.", parse_mode="HTML")
                 return
 
-            gainers = gainer_service.filter_gainers(tickers, min_percent)
+            gainers = gainer_service.filter_gainers(tickers, min_percent, futures_only=True)
             if not gainers:
-                await status_msg.edit_text(f"ℹ️ No USDT trading pairs currently meet the ≥ <b>{min_percent:.0f}%</b> gain criteria.", parse_mode="HTML")
+                await status_msg.edit_text(f"ℹ️ No Futures USDT trading pairs currently meet the ≥ <b>{min_percent:.0f}%</b> gain criteria.", parse_mode="HTML")
                 return
 
             # Display top 15
             top_gainers = gainers[:15]
             response = (
-                f"⚡ <b>CryptoPulse VIP | 24h Top Gainers</b> ⚡\n"
+                f"⚡ <b>CryptoPulse VIP | 24h Futures Top Gainers</b> ⚡\n"
                 f"━━━━━━━━━━━━━━━━━━━━━\n"
-                f"🔥 <i>Pairs with ≥{min_percent:.0f}% rolling 24h momentum</i>\n\n"
+                f"🔥 <i>Futures pairs with ≥{min_percent:.0f}% rolling 24h momentum</i>\n\n"
             )
             for g in top_gainers:
                 sym = g["symbol"]
@@ -672,24 +673,24 @@ async def handle_admin_message(update: Update, context: ContextTypes.DEFAULT_TYP
                 except ValueError:
                     min_drop = 30.0
                     
-            status_msg = await msg.reply_text(f"⏳ Scanning Binance 24h market stats for pairs ≤ <b>-{min_drop:.0f}%</b> drop...", parse_mode="HTML")
+            status_msg = await msg.reply_text(f"⏳ Scanning Binance 24h Futures market stats for pairs ≤ <b>-{min_drop:.0f}%</b> drop...", parse_mode="HTML")
             
-            tickers = await gainer_service.fetch_24h_tickers()
+            tickers = await gainer_service.fetch_24h_tickers(futures_priority=True)
             if not tickers:
                 await status_msg.edit_text("❌ Failed to fetch market stats from Binance.", parse_mode="HTML")
                 return
 
-            losers = gainer_service.filter_losers(tickers, min_drop)
+            losers = gainer_service.filter_losers(tickers, min_drop, futures_only=True)
             if not losers:
-                await status_msg.edit_text(f"ℹ️ No USDT trading pairs currently meet the ≤ <b>-{min_drop:.0f}%</b> drop criteria.", parse_mode="HTML")
+                await status_msg.edit_text(f"ℹ️ No Futures USDT trading pairs currently meet the ≤ <b>-{min_drop:.0f}%</b> drop criteria.", parse_mode="HTML")
                 return
 
             # Display top 15
             top_losers = losers[:15]
             response = (
-                f"⚡ <b>CryptoPulse VIP | 24h Top Losers</b> ⚡\n"
+                f"⚡ <b>CryptoPulse VIP | 24h Futures Top Losers</b> ⚡\n"
                 f"━━━━━━━━━━━━━━━━━━━━━\n"
-                f"🔻 <i>Pairs with ≥{min_drop:.0f}% rolling 24h downside crash</i>\n\n"
+                f"🔻 <i>Futures pairs with ≥{min_drop:.0f}% rolling 24h downside crash</i>\n\n"
             )
             for l in top_losers:
                 sym = l["symbol"]
@@ -709,16 +710,16 @@ async def handle_admin_message(update: Update, context: ContextTypes.DEFAULT_TYP
             await status_msg.edit_text(response, parse_mode="HTML")
 
         elif cmd_type == "pump_card":
-            import card_service
-            import httpx
             user_symbol = command["symbol"]
             resolved = price_fetcher.resolve_symbol(user_symbol)
 
             status_msg = await msg.reply_text(f"⏳ Generating VIP pump alert card for <b>#{resolved}</b>...", parse_mode="HTML")
             try:
-                # Fetch 24h ticker for coin
+                # Fetch 24h ticker prioritizing Futures endpoint, with Spot fallback
                 async with httpx.AsyncClient() as client:
-                    resp = await client.get(f"https://api.binance.com/api/v3/ticker/24hr?symbol={resolved}", timeout=10.0)
+                    resp = await client.get(f"https://fapi.binance.com/fapi/v1/ticker/24hr?symbol={resolved}", timeout=10.0)
+                    if resp.status_code != 200:
+                        resp = await client.get(f"https://api.binance.com/api/v3/ticker/24hr?symbol={resolved}", timeout=10.0)
                     if resp.status_code != 200:
                         await status_msg.edit_text(f"❌ Could not find 24h statistics for <b>#{resolved}</b> on Binance.", parse_mode="HTML")
                         return
@@ -730,13 +731,16 @@ async def handle_admin_message(update: Update, context: ContextTypes.DEFAULT_TYP
                 low_24h = float(d.get("lowPrice", 0.0))
                 volume_24h = float(d.get("quoteVolume", 0.0))
 
+                market_type = await price_fetcher.get_market_type(resolved)
+
                 card_bytes, multiplier = await card_service.generate_combined_alert(
                     symbol=resolved,
                     current_pct=current_pct,
                     current_price=current_price,
                     high_24h=high_24h,
                     low_24h=low_24h,
-                    volume_24h=volume_24h
+                    volume_24h=volume_24h,
+                    market_type=market_type
                 )
 
                 card_caption = gainer_service.format_pump_alert(
@@ -746,7 +750,8 @@ async def handle_admin_message(update: Update, context: ContextTypes.DEFAULT_TYP
                     high_24h=high_24h,
                     low_24h=low_24h,
                     volume_24h=volume_24h,
-                    multiplier=multiplier
+                    multiplier=multiplier,
+                    market_type=market_type
                 )
 
                 if card_bytes:
@@ -769,16 +774,16 @@ async def handle_admin_message(update: Update, context: ContextTypes.DEFAULT_TYP
                     await msg.reply_text(f"❌ Error generating VIP card for #{resolved}: {html.escape(str(e))}")
 
         elif cmd_type == "dump_card":
-            import card_service
-            import httpx
             user_symbol = command["symbol"]
             resolved = price_fetcher.resolve_symbol(user_symbol)
 
             status_msg = await msg.reply_text(f"⏳ Generating VIP dump alert card for <b>#{resolved}</b>...", parse_mode="HTML")
             try:
-                # Fetch 24h ticker for coin
+                # Fetch 24h ticker prioritizing Futures endpoint, with Spot fallback
                 async with httpx.AsyncClient() as client:
-                    resp = await client.get(f"https://api.binance.com/api/v3/ticker/24hr?symbol={resolved}", timeout=10.0)
+                    resp = await client.get(f"https://fapi.binance.com/fapi/v1/ticker/24hr?symbol={resolved}", timeout=10.0)
+                    if resp.status_code != 200:
+                        resp = await client.get(f"https://api.binance.com/api/v3/ticker/24hr?symbol={resolved}", timeout=10.0)
                     if resp.status_code != 200:
                         await status_msg.edit_text(f"❌ Could not find 24h statistics for <b>#{resolved}</b> on Binance.", parse_mode="HTML")
                         return
@@ -790,13 +795,16 @@ async def handle_admin_message(update: Update, context: ContextTypes.DEFAULT_TYP
                 low_24h = float(d.get("lowPrice", 0.0))
                 volume_24h = float(d.get("quoteVolume", 0.0))
 
+                market_type = await price_fetcher.get_market_type(resolved)
+
                 card_bytes, multiplier = await card_service.generate_combined_alert(
                     symbol=resolved,
                     current_pct=current_pct,
                     current_price=current_price,
                     high_24h=high_24h,
                     low_24h=low_24h,
-                    volume_24h=volume_24h
+                    volume_24h=volume_24h,
+                    market_type=market_type
                 )
 
                 card_caption = gainer_service.format_pump_alert(
@@ -806,7 +814,8 @@ async def handle_admin_message(update: Update, context: ContextTypes.DEFAULT_TYP
                     high_24h=high_24h,
                     low_24h=low_24h,
                     volume_24h=volume_24h,
-                    multiplier=multiplier
+                    multiplier=multiplier,
+                    market_type=market_type
                 )
 
                 if card_bytes:
@@ -829,16 +838,16 @@ async def handle_admin_message(update: Update, context: ContextTypes.DEFAULT_TYP
                     await msg.reply_text(f"❌ Error generating VIP card for #{resolved}: {html.escape(str(e))}")
 
         elif cmd_type == "pump_chart":
-            import chart_service
-            import httpx
             user_symbol = command["symbol"]
             resolved = price_fetcher.resolve_symbol(user_symbol)
 
             status_msg = await msg.reply_text(f"⏳ Generating momentum chart for <b>#{resolved}</b>...", parse_mode="HTML")
             try:
-                # Fetch 24h ticker for coin
+                # Fetch 24h ticker prioritizing Futures endpoint, with Spot fallback
                 async with httpx.AsyncClient() as client:
-                    resp = await client.get(f"https://api.binance.com/api/v3/ticker/24hr?symbol={resolved}", timeout=10.0)
+                    resp = await client.get(f"https://fapi.binance.com/fapi/v1/ticker/24hr?symbol={resolved}", timeout=10.0)
+                    if resp.status_code != 200:
+                        resp = await client.get(f"https://api.binance.com/api/v3/ticker/24hr?symbol={resolved}", timeout=10.0)
                     if resp.status_code != 200:
                         await status_msg.edit_text(f"❌ Could not find 24h statistics for <b>#{resolved}</b> on Binance.", parse_mode="HTML")
                         return
@@ -849,6 +858,8 @@ async def handle_admin_message(update: Update, context: ContextTypes.DEFAULT_TYP
                 high_24h = float(d.get("highPrice", 0.0))
                 low_24h = float(d.get("lowPrice", 0.0))
                 volume_24h = float(d.get("quoteVolume", 0.0))
+
+                market_type = await price_fetcher.get_market_type(resolved)
 
                 chart_bytes, multiplier = await chart_service.generate_pump_chart(
                     symbol=resolved,
@@ -866,7 +877,8 @@ async def handle_admin_message(update: Update, context: ContextTypes.DEFAULT_TYP
                     high_24h=high_24h,
                     low_24h=low_24h,
                     volume_24h=volume_24h,
-                    multiplier=multiplier
+                    multiplier=multiplier,
+                    market_type=market_type
                 )
 
                 if chart_bytes:
@@ -889,9 +901,6 @@ async def handle_admin_message(update: Update, context: ContextTypes.DEFAULT_TYP
                     await msg.reply_text(f"❌ Error generating chart for #{resolved}: {html.escape(str(e))}")
 
         elif cmd_type == "test_pump":
-            import card_service
-            import gainer_service
-            
             raw_sym = command.get("symbol") or "PNTUSDT"
             resolved = price_fetcher.resolve_symbol(raw_sym) if not raw_sym.upper().startswith("TEST") else "TESTUSDT"
 
@@ -906,7 +915,6 @@ async def handle_admin_message(update: Update, context: ContextTypes.DEFAULT_TYP
 
                 if resolved != "TESTUSDT":
                     try:
-                        import httpx
                         async with httpx.AsyncClient() as client:
                             resp = await client.get(f"https://api.binance.com/api/v3/ticker/24hr?symbol={resolved}", timeout=6.0)
                             if resp.status_code == 200:
@@ -921,6 +929,8 @@ async def handle_admin_message(update: Update, context: ContextTypes.DEFAULT_TYP
                     except Exception as fe:
                         logger.debug(f"Ticker fetch failed for test {resolved}, using default test values: {fe}")
 
+                market_type = await price_fetcher.get_market_type(resolved)
+
                 card_bytes, _ = await card_service.generate_combined_alert(
                     symbol=resolved,
                     current_pct=test_pct,
@@ -928,7 +938,8 @@ async def handle_admin_message(update: Update, context: ContextTypes.DEFAULT_TYP
                     high_24h=test_high,
                     low_24h=test_low,
                     volume_24h=test_vol,
-                    multiplier=test_multiplier
+                    multiplier=test_multiplier,
+                    market_type=market_type
                 )
 
                 card_caption = gainer_service.format_pump_alert(
@@ -938,7 +949,8 @@ async def handle_admin_message(update: Update, context: ContextTypes.DEFAULT_TYP
                     high_24h=test_high,
                     low_24h=test_low,
                     volume_24h=test_vol,
-                    multiplier=test_multiplier
+                    multiplier=test_multiplier,
+                    market_type=market_type
                 )
 
                 if card_bytes:
@@ -984,9 +996,6 @@ async def handle_admin_message(update: Update, context: ContextTypes.DEFAULT_TYP
                     await msg.reply_text(f"❌ Error generating test alert: {html.escape(str(e))}")
 
         elif cmd_type == "test_dump":
-            import card_service
-            import gainer_service
-            
             raw_sym = command.get("symbol") or "LUNAUSDT"
             resolved = price_fetcher.resolve_symbol(raw_sym) if not raw_sym.upper().startswith("TEST") else "TESTUSDT"
 
@@ -1001,7 +1010,6 @@ async def handle_admin_message(update: Update, context: ContextTypes.DEFAULT_TYP
 
                 if resolved != "TESTUSDT":
                     try:
-                        import httpx
                         async with httpx.AsyncClient() as client:
                             resp = await client.get(f"https://api.binance.com/api/v3/ticker/24hr?symbol={resolved}", timeout=6.0)
                             if resp.status_code == 200:
@@ -1016,6 +1024,8 @@ async def handle_admin_message(update: Update, context: ContextTypes.DEFAULT_TYP
                     except Exception as fe:
                         logger.debug(f"Ticker fetch failed for test {resolved}, using default test values: {fe}")
 
+                market_type = await price_fetcher.get_market_type(resolved)
+
                 card_bytes, _ = await card_service.generate_combined_alert(
                     symbol=resolved,
                     current_pct=test_pct,
@@ -1023,7 +1033,8 @@ async def handle_admin_message(update: Update, context: ContextTypes.DEFAULT_TYP
                     high_24h=test_high,
                     low_24h=test_low,
                     volume_24h=test_vol,
-                    multiplier=test_multiplier
+                    multiplier=test_multiplier,
+                    market_type=market_type
                 )
 
                 card_caption = gainer_service.format_pump_alert(
@@ -1033,7 +1044,8 @@ async def handle_admin_message(update: Update, context: ContextTypes.DEFAULT_TYP
                     high_24h=test_high,
                     low_24h=test_low,
                     volume_24h=test_vol,
-                    multiplier=test_multiplier
+                    multiplier=test_multiplier,
+                    market_type=market_type
                 )
 
                 if card_bytes:
@@ -1194,5 +1206,3 @@ async def handle_admin_message(update: Update, context: ContextTypes.DEFAULT_TYP
             await msg.reply_text(f"❌ Error processing command: {str(e)}")
         except Exception as reply_err:
             logger.error(f"Failed to reply with error message: {reply_err}")
-
-import asyncio

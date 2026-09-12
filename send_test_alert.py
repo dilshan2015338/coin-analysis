@@ -70,6 +70,10 @@ async def main():
         except Exception as e:
             print(f"⚠️ Could not fetch live ticker: {e}. Using simulated values.")
 
+    # Resolve market type (Spot vs Futures)
+    market_type = await price_fetcher.get_market_type(resolved)
+    print(f"🏷️ Market classification: {market_type}")
+
     # Generate Combined VIP Card + 15M Chart
     print(f"🎨 Rendering VIP {alert_type.capitalize()} Alert Card + 15M Candlestick Chart graphic...")
     card_bytes, _ = await card_service.generate_combined_alert(
@@ -79,7 +83,8 @@ async def main():
         high_24h=test_high,
         low_24h=test_low,
         volume_24h=test_vol,
-        multiplier=test_multiplier
+        multiplier=test_multiplier,
+        market_type=market_type
     )
 
     caption = gainer_service.format_pump_alert(
@@ -89,7 +94,8 @@ async def main():
         high_24h=test_high,
         low_24h=test_low,
         volume_24h=test_vol,
-        multiplier=test_multiplier
+        multiplier=test_multiplier,
+        market_type=market_type
     )
 
     # Local file preview

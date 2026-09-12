@@ -81,7 +81,8 @@ def render_pump_card(
     high_24h: float,
     low_24h: float,
     volume_24h: float,
-    multiplier: Optional[float] = None
+    multiplier: Optional[float] = None,
+    market_type: Optional[str] = None
 ) -> io.BytesIO:
     """
     Renders the institutional, dark-themed CryptoPulse VIP alert card as a PNG image.
@@ -90,6 +91,13 @@ def render_pump_card(
     width, height = 940, 520
 
     is_dump = current_pct < 0
+
+    if not market_type:
+        try:
+            import price_fetcher
+            market_type = price_fetcher.get_market_type_sync(symbol)
+        except Exception:
+            market_type = "Spot"
 
     # Color Palette
     bg_color = (11, 17, 24, 255)       # Outer frame: #0B1118
@@ -180,7 +188,7 @@ def render_pump_card(
     h_w = draw.textlength(banner_title, font=f_banner_h)
     paste_icon("siren", int(banner_x0 + 18 + siren_size + 8 + h_w + 8), banner_y0 + 14, siren_size)
 
-    # Banner subtext: Pair: #SYMBOL · Top Gainer / Loser Radar
+    # Banner subtext: Pair: #SYMBOL · Market · Top Gainer / Loser Radar
     sub_y = banner_y0 + 45
     pair_str = "Pair: "
     draw.text((banner_x0 + 18, sub_y), pair_str, font=f_banner_sub, fill=text_muted)
@@ -190,8 +198,13 @@ def render_pump_card(
     draw.text((int(banner_x0 + 18 + p_w), sub_y), coin_str, font=f_banner_coin, fill=cyan_blue)
     c_w = draw.textlength(coin_str, font=f_banner_coin)
 
+    market_str = f" · {market_type}" if market_type else ""
+    m_x = int(banner_x0 + 18 + p_w + c_w)
+    draw.text((m_x, sub_y), market_str, font=f_banner_sub, fill=(226, 232, 240, 255))
+    m_w = draw.textlength(market_str, font=f_banner_sub)
+
     radar_tag = " · Top Loser Radar" if is_dump else " · Top Gainer Radar"
-    draw.text((int(banner_x0 + 18 + p_w + c_w), sub_y), radar_tag, font=f_banner_sub, fill=text_muted)
+    draw.text((int(m_x + m_w), sub_y), radar_tag, font=f_banner_sub, fill=text_muted)
 
     # 3. 2x2 Metric Grid
     grid_y0 = banner_y1 + 18
@@ -340,7 +353,8 @@ async def generate_combined_alert(
     high_24h: float,
     low_24h: float,
     volume_24h: float,
-    multiplier: Optional[float] = None
+    multiplier: Optional[float] = None,
+    market_type: Optional[str] = None
 ) -> Tuple[Optional[io.BytesIO], Optional[float]]:
     """
     Generates a unified graphic combining the VIP Alert Card (top) and the 15M Candlestick Chart (bottom).
@@ -370,7 +384,8 @@ async def generate_combined_alert(
             high_24h=high_24h,
             low_24h=low_24h,
             volume_24h=volume_24h,
-            multiplier=multiplier
+            multiplier=multiplier,
+            market_type=market_type
         )
 
         # 3. Combine if chart available
@@ -388,7 +403,8 @@ async def generate_combined_alert(
                 high_24h=high_24h,
                 low_24h=low_24h,
                 volume_24h=volume_24h,
-                multiplier=multiplier
+                multiplier=multiplier,
+                market_type=market_type
             )
             return card_buf, multiplier
         except Exception:

@@ -27,3 +27,6 @@ Thumbs.db
 # Test & Preview images
 test_*_preview.png
 
+# Deployment archives
+*.zip
+

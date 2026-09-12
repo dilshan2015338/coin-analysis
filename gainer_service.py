@@ -63,59 +63,96 @@ def format_pump_alert(
     low_24h: Optional[float] = None,
     volume_24h: Optional[float] = None,
     multiplier: Optional[float] = None,
-    alert_id: Optional[int] = None
+    alert_id: Optional[int] = None,
+    market_type: Optional[str] = None
 ) -> str:
     """
     Formats a sleek, creative Telegram alert caption highlighting:
     - CryptoPulse VIP Bot
     - PUMP or DUMP ALERT
     - Currency pair
+    - Market type (Spot / Futures / Spot & Futures)
     - 24h Change
     """
     esc_sym = html.escape(symbol)
+    if not market_type:
+        try:
+            import price_fetcher
+            market_type = price_fetcher.get_market_type_sync(symbol)
+        except Exception:
+            market_type = "Spot"
+
+    esc_market = html.escape(market_type)
     if current_pct < 0:
         pct_str = f"{current_pct:.2f}%"
         return (
             f"⚡ <b>CryptoPulse VIP Bot</b>\n"
-            f"<blockquote>🔻 <b>DUMP ALERT: #{esc_sym}</b> ➔ <code>{pct_str}</code> 🔴</blockquote>"
+            f"<blockquote>🔻 <b>DUMP ALERT: #{esc_sym}</b> ➔ <code>{pct_str}</code> 🔴\n"
+            f"🏷️ <b>Market:</b> <code>{esc_market}</code></blockquote>"
         )
     else:
         pct_str = f"+{current_pct:.2f}%"
         return (
             f"⚡ <b>CryptoPulse VIP Bot</b>\n"
-            f"<blockquote>🚨 <b>PUMP ALERT: #{esc_sym}</b> ➔ <code>{pct_str}</code> 🟢</blockquote>"
+            f"<blockquote>🚨 <b>PUMP ALERT: #{esc_sym}</b> ➔ <code>{pct_str}</code> 🟢\n"
+            f"🏷️ <b>Market:</b> <code>{esc_market}</code></blockquote>"
         )
 
 # Backward compatibility alias
 format_dump_alert = format_pump_alert
 
 
-async def fetch_24h_tickers() -> List[dict]:
-    """Queries the Binance Spot API for rolling 24-hour ticker statistics."""
-    url = "https://api.binance.com/api/v3/ticker/24hr"
+async def fetch_24h_tickers(futures_priority: bool = True) -> List[dict]:
+    """
+    Queries 24-hour ticker statistics from Binance.
+    When futures_priority is True (default), queries Binance Futures API (fapi.binance.com)
+    to prioritize active Futures contracts over SPOT-only tokens.
+    Falls back to Binance Spot API if Futures API is unavailable.
+    """
+    primary_url = "https://fapi.binance.com/fapi/v1/ticker/24hr" if futures_priority else "https://api.binance.com/api/v3/ticker/24hr"
     async with httpx.AsyncClient() as client:
         try:
-            response = await client.get(url, timeout=15.0)
+            response = await client.get(primary_url, timeout=15.0)
             if response.status_code == 200:
                 data = response.json()
                 if isinstance(data, list):
                     return data
             else:
-                logger.warning(f"Binance 24h ticker response code: {response.status_code}")
+                logger.warning(f"Binance 24h ticker response code: {response.status_code} from {primary_url}")
         except Exception as e:
-            logger.error(f"Error fetching 24h tickers from Binance: {e}")
+            logger.error(f"Error fetching 24h tickers from {primary_url}: {e}")
+
+    # Fallback to Spot if futures was primary and failed
+    if futures_priority:
+        logger.info("Attempting fallback to Binance Spot 24h ticker endpoint...")
+        try:
+            async with httpx.AsyncClient() as client:
+                response = await client.get("https://api.binance.com/api/v3/ticker/24hr", timeout=15.0)
+                if response.status_code == 200:
+                    data = response.json()
+                    if isinstance(data, list):
+                        return data
+        except Exception as e:
+            logger.error(f"Error fetching 24h tickers from Spot fallback: {e}")
+
     return []
 
-def filter_gainers(tickers: List[dict], min_percent: float) -> List[dict]:
+def filter_gainers(tickers: List[dict], min_percent: float, futures_only: bool = True) -> List[dict]:
     """
     Filters ticker lists for USDT trading pairs that meet minimum percentage 
     and daily quote volume (> $100k USDT) requirements.
+    When futures_only is True, excludes SPOT-only coins.
     """
+    import price_fetcher
     gainers = []
     for t in tickers:
         symbol = t.get("symbol", "")
         # Filter for USDT pairs
         if not symbol.endswith("USDT"):
+            continue
+
+        # Exclude Spot-only coins if futures_only is enforced and market cache is populated
+        if futures_only and price_fetcher._FUTURES_SYMBOLS and symbol not in price_fetcher._FUTURES_SYMBOLS:
             continue
             
         try:
@@ -140,17 +177,23 @@ def filter_gainers(tickers: List[dict], min_percent: float) -> List[dict]:
     gainers.sort(key=lambda x: x["priceChangePercent"], reverse=True)
     return gainers
 
-def filter_losers(tickers: List[dict], min_drop_percent: float) -> List[dict]:
+def filter_losers(tickers: List[dict], min_drop_percent: float, futures_only: bool = True) -> List[dict]:
     """
     Filters ticker lists for USDT trading pairs that meet minimum drop percentage 
     (e.g. drop >= 30%) and daily quote volume (> $100k USDT) requirements.
+    When futures_only is True, excludes SPOT-only coins.
     Sorted ascending by change percentage (biggest drops first).
     """
+    import price_fetcher
     threshold_neg = -abs(min_drop_percent)
     losers = []
     for t in tickers:
         symbol = t.get("symbol", "")
         if not symbol.endswith("USDT"):
+            continue
+
+        # Exclude Spot-only coins if futures_only is enforced and market cache is populated
+        if futures_only and price_fetcher._FUTURES_SYMBOLS and symbol not in price_fetcher._FUTURES_SYMBOLS:
             continue
             
         try:
@@ -238,13 +281,17 @@ async def run_gainer_scanner(application: Any):
 
     logger.info(f"Running market-wide 24h radar scanner (gainer threshold: +{threshold}%, dump threshold: -{dump_threshold}%)...")
     
-    tickers = await fetch_24h_tickers()
+    tickers = await fetch_24h_tickers(futures_priority=True)
     if not tickers:
         logger.warning("No tickers returned from Binance 24h endpoint.")
         return
 
-    gainers = filter_gainers(tickers, threshold)
-    losers = filter_losers(tickers, dump_threshold)
+    # Ensure market cache is fresh so we can strictly exclude SPOT-only coins
+    import price_fetcher
+    await price_fetcher.refresh_market_cache()
+
+    gainers = filter_gainers(tickers, threshold, futures_only=True)
+    losers = filter_losers(tickers, dump_threshold, futures_only=True)
 
     now = datetime.datetime.now(datetime.timezone.utc)
 
@@ -256,6 +303,12 @@ async def run_gainer_scanner(application: Any):
         high_24h = g["highPrice"]
         low_24h = g["lowPrice"]
         volume_24h = g["quoteVolume"]
+
+        # Market requirement: Futures priority - strictly skip SPOT-only pairs
+        market_type = await price_fetcher.get_market_type(symbol)
+        if market_type == "Spot":
+            logger.info(f"Skipping pump alert for {symbol}: Spot-only pair excluded (Futures priority requirement).")
+            continue
 
         # Check last alert history in DB
         last_alert = db.get_last_gainer_alert(symbol)
@@ -295,7 +348,8 @@ async def run_gainer_scanner(application: Any):
                 current_price=current_price,
                 high_24h=high_24h,
                 low_24h=low_24h,
-                volume_24h=volume_24h
+                volume_24h=volume_24h,
+                market_type=market_type
             )
 
             msg = format_pump_alert(
@@ -305,7 +359,8 @@ async def run_gainer_scanner(application: Any):
                 high_24h=high_24h,
                 low_24h=low_24h,
                 volume_24h=volume_24h,
-                multiplier=multiplier
+                multiplier=multiplier,
+                market_type=market_type
             )
 
             try:
@@ -336,7 +391,7 @@ async def run_gainer_scanner(application: Any):
                 except Exception as fe:
                     logger.warning(f"Failed fallback HTML pump alert for {symbol}: {fe}. Retrying plain text...")
                     try:
-                        clean_text = msg.replace('<b>', '').replace('</b>', '').replace('<code>', '').replace('</code>', '').replace('<blockquote>', '').replace('</blockquote>', '')
+                        clean_text = msg.replace('<b>', '').replace('</b>', '').replace('<code>', '').replace('</code>', '').replace('<blockquote>', '').replace('</blockquote>', '').replace('&amp;', '&')
                         await application.bot.send_message(chat_id=TARGET_CHAT_ID, text=clean_text)
                     except Exception as pte:
                         logger.error(f"Failed plain text pump alert for {symbol}: {pte}")
@@ -385,6 +440,12 @@ async def run_gainer_scanner(application: Any):
         low_24h = l["lowPrice"]
         volume_24h = l["quoteVolume"]
 
+        # Market requirement: Futures priority - strictly skip SPOT-only pairs
+        market_type = await price_fetcher.get_market_type(symbol)
+        if market_type == "Spot":
+            logger.info(f"Skipping dump alert for {symbol}: Spot-only pair excluded (Futures priority requirement).")
+            continue
+
         # Check last dump alert history in DB
         last_alert = db.get_last_dump_alert(symbol)
         should_alert = False
@@ -423,7 +484,8 @@ async def run_gainer_scanner(application: Any):
                 current_price=current_price,
                 high_24h=high_24h,
                 low_24h=low_24h,
-                volume_24h=volume_24h
+                volume_24h=volume_24h,
+                market_type=market_type
             )
 
             msg = format_pump_alert(
@@ -433,7 +495,8 @@ async def run_gainer_scanner(application: Any):
                 high_24h=high_24h,
                 low_24h=low_24h,
                 volume_24h=volume_24h,
-                multiplier=multiplier
+                multiplier=multiplier,
+                market_type=market_type
             )
 
             try:
@@ -464,7 +527,7 @@ async def run_gainer_scanner(application: Any):
                 except Exception as fe:
                     logger.warning(f"Failed fallback HTML dump alert for {symbol}: {fe}. Retrying plain text...")
                     try:
-                        clean_text = msg.replace('<b>', '').replace('</b>', '').replace('<code>', '').replace('</code>', '').replace('<blockquote>', '').replace('</blockquote>', '')
+                        clean_text = msg.replace('<b>', '').replace('</b>', '').replace('<code>', '').replace('</code>', '').replace('<blockquote>', '').replace('</blockquote>', '').replace('&amp;', '&')
                         await application.bot.send_message(chat_id=TARGET_CHAT_ID, text=clean_text)
                     except Exception as pte:
                         logger.error(f"Failed plain text dump alert for {symbol}: {pte}")
