@@ -29,6 +29,10 @@ def parse_chat_id(value: str) -> Any:
 
 TARGET_CHAT_ID = parse_chat_id(TARGET_CHAT_ID_RAW)
 
+# Toggle to enable/disable automated trade signal alerts (e.g. CRITICAL SHORT / LONG alerts)
+# Temporarily disabled per user request. Set to True or set ENABLE_TRADE_ALERTS=true in .env to re-enable.
+ENABLE_TRADE_SIGNAL_ALERTS = os.getenv("ENABLE_TRADE_ALERTS", "false").lower() in ("true", "1", "yes")
+
 def format_volume(vol: float) -> str:
     """Formats dollar volumes cleanly (e.g. $5.82M or $120.50K)."""
     if vol >= 1_000_000_000.0:
@@ -397,39 +401,41 @@ async def run_gainer_scanner(application: Any):
                         logger.error(f"Failed plain text pump alert for {symbol}: {pte}")
 
             # Run Mean Reversion Short Analyst signal evaluation
-            try:
-                import analyst_service
-                eval_data = {
-                    "symbol": symbol,
-                    "priceChangePercent": current_pct,
-                    "lastPrice": current_price,
-                    "highPrice": high_24h,
-                    "lowPrice": low_24h,
-                    "quoteVolume": volume_24h
-                }
-                eval_result = await analyst_service.evaluate_gainer(eval_data)
-                decision = eval_result.get("decision", "NO_TRADE")
-                logger.info(f"Analyst evaluation for {symbol}: decision={decision}, confidence={eval_result.get('confidence_score')}%")
-                
-                if decision == "ENTER_SHORT":
-                    short_alert_msg = eval_result.get("telegram_alert")
-                    if short_alert_msg:
-                        try:
-                            await application.bot.send_message(
-                                chat_id=TARGET_CHAT_ID,
-                                text=short_alert_msg,
-                                parse_mode="Markdown"
-                            )
-                            logger.info(f"Dispatched trade short signal alert for {symbol} to Telegram.")
-                        except Exception as sme:
-                            logger.warning(f"Markdown send failed for short alert ({sme}), falling back to plain text...")
-                            clean_short = short_alert_msg.replace('*', '').replace('`', '').replace('_', '')
-                            await application.bot.send_message(
-                                chat_id=TARGET_CHAT_ID,
-                                text=clean_short
-                            )
-            except Exception as ae:
-                logger.error(f"Failed to run short analyst evaluation or send alert for {symbol}: {ae}", exc_info=True)
+            # (Temporarily disabled per user request - set ENABLE_TRADE_SIGNAL_ALERTS = True to re-enable)
+            if ENABLE_TRADE_SIGNAL_ALERTS:
+                try:
+                    import analyst_service
+                    eval_data = {
+                        "symbol": symbol,
+                        "priceChangePercent": current_pct,
+                        "lastPrice": current_price,
+                        "highPrice": high_24h,
+                        "lowPrice": low_24h,
+                        "quoteVolume": volume_24h
+                    }
+                    eval_result = await analyst_service.evaluate_gainer(eval_data)
+                    decision = eval_result.get("decision", "NO_TRADE")
+                    logger.info(f"Analyst evaluation for {symbol}: decision={decision}, confidence={eval_result.get('confidence_score')}%")
+                    
+                    if decision in ("ENTER_SHORT", "ENTER_LONG"):
+                        short_alert_msg = eval_result.get("telegram_alert")
+                        if short_alert_msg:
+                            try:
+                                await application.bot.send_message(
+                                    chat_id=TARGET_CHAT_ID,
+                                    text=short_alert_msg,
+                                    parse_mode="Markdown"
+                                )
+                                logger.info(f"Dispatched trade signal alert for {symbol} to Telegram.")
+                            except Exception as sme:
+                                logger.warning(f"Markdown send failed for trade alert ({sme}), falling back to plain text...")
+                                clean_short = short_alert_msg.replace('*', '').replace('`', '').replace('_', '')
+                                await application.bot.send_message(
+                                    chat_id=TARGET_CHAT_ID,
+                                    text=clean_short
+                                )
+                except Exception as ae:
+                    logger.error(f"Failed to run trade analyst evaluation or send alert for {symbol}: {ae}", exc_info=True)
 
     # --- 2. Process 24h Downside Crash Losers ---
     for l in losers:
