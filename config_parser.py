@@ -113,7 +113,7 @@ def parse_message_command(text: str) -> Optional[Dict[str, Any]]:
 
     # 5. Status Check Command
     # Matches: /status [SYMBOL] or CONFIG STATUS [SYMBOL] (optional SYMBOL)
-    status_match = re.search(r"^(?:/status|CONFIG\s+STATUS)(?:\s+(\S+))?$", text, re.IGNORECASE)
+    status_match = re.search(r"^(?:/status(?:@\w+)?|CONFIG\s+STATUS)(?:\s+(\S+))?\s*$", text, re.IGNORECASE)
     if status_match:
         symbol = status_match.group(1)
         if symbol:
@@ -122,7 +122,7 @@ def parse_message_command(text: str) -> Optional[Dict[str, Any]]:
 
     # Matches: /short_status SYMBOL or /evaluate SYMBOL or CONFIG SHORT_STATUS SYMBOL or CONFIG EVALUATE SYMBOL
     short_status_match = re.search(
-        r"^(?:/short_status|/evaluate|CONFIG\s+(?:SHORT_STATUS|EVALUATE))\s+(\S+)$", 
+        r"^(?:/(?:short_status|evaluate)(?:@\w+)?|CONFIG\s+(?:SHORT_STATUS|EVALUATE))\s+(\S+)\s*$", 
         text, 
         re.IGNORECASE
     )
@@ -285,9 +285,9 @@ def parse_message_command(text: str) -> Optional[Dict[str, Any]]:
         }
 
     # 13. Market Analyzer Command
-    # Matches: /analyze BTC, /analysis BTC, CONFIG ANALYZE BTC, CONFIG ANALYSIS BTC
+    # Matches: /analyze BTC, /analysis BTC, /analyze@bot BTC, CONFIG ANALYZE BTC, CONFIG ANALYSIS BTC
     analyze_match = re.search(
-        r"^(?:/analyze|/analysis|CONFIG\s+(?:ANALYZE|ANALYSIS))\s+(\S+)$",
+        r"^(?:/(?:analyze|analysis)(?:@\w+)?|CONFIG\s+(?:ANALYZE|ANALYSIS))\s+(\S+)\s*$",
         text,
         re.IGNORECASE
     )
@@ -299,7 +299,7 @@ def parse_message_command(text: str) -> Optional[Dict[str, Any]]:
 
     # 14. Help / Start Command
     # Matches: /help, /start or CONFIG HELP
-    if re.search(r"^(?:/help|/start|CONFIG\s+HELP)$", text, re.IGNORECASE):
+    if re.search(r"^(?:/(?:help|start)(?:@\w+)?|CONFIG\s+HELP)$", text, re.IGNORECASE):
         return {"type": "help"}
 
     return None

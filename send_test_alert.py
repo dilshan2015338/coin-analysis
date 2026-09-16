@@ -21,6 +21,7 @@ async def main():
     parser.add_argument("--dump", action="store_true", help="Simulate a 24h Downside Dump Alert (red theme) instead of a Pump Alert")
     parser.add_argument("--preview", action="store_true", help="Only generate and save PNG preview locally without posting to Telegram")
     parser.add_argument("--chat_id", type=str, default=None, help="Override target chat ID for this test")
+    parser.add_argument("--me", action="store_true", help="Send to personal ME channel/chat configured via _ME environment variables")
     args = parser.parse_args()
 
     raw_symbol = args.symbol.upper()
@@ -109,24 +110,51 @@ async def main():
         print("\n--- Alert Caption Preview ---")
         print(caption)
         print("----------------------------")
+        import analyst_service
+        eval_data = {
+            "symbol": resolved if resolved != "TESTUSDT" else "BTCUSDT",
+            "priceChangePercent": test_pct,
+            "lastPrice": test_price,
+            "highPrice": test_high,
+            "lowPrice": test_low,
+            "quoteVolume": test_vol
+        }
+        eval_result = await analyst_service.evaluate_gainer(eval_data)
+        if resolved == "TESTUSDT":
+            eval_result["ticker"] = "TESTUSDT"
+            eval_result["telegram_alert"] = analyst_service.format_quantitative_risk_alert(eval_result)
+        print("\n--- Quantitative Risk & Stop-Loss Preview ---")
+        print(eval_result.get("telegram_alert"))
+        print("---------------------------------------------")
         print("✨ Done (--preview mode: not sending to Telegram).")
         return
 
-    # Send to Telegram
-    bot_token = os.getenv("TELEGRAM_BOT_TOKEN")
-    target_chat = args.chat_id or os.getenv("TARGET_CHAT_ID")
+    # Telegram Credentials & Destination Selection
+    target_me_chat = os.getenv("TARGET_CHAT_ID_ME") or os.getenv("TARGET_CHAT_ME")
+    token_me = os.getenv("TELEGRAM_BOT_TOKEN_ME") or os.getenv("BOT_TOKEN_ME")
+
+    if args.me or (target_me_chat and not args.chat_id):
+        target_chat = args.chat_id or target_me_chat
+        bot_token = token_me or os.getenv("TELEGRAM_BOT_TOKEN")
+        is_me_destination = True
+        print(f"👤 Target mode: Personal 'ME' channel ({target_chat})")
+    else:
+        target_chat = args.chat_id or os.getenv("TARGET_CHAT_ID")
+        bot_token = os.getenv("TELEGRAM_BOT_TOKEN")
+        is_me_destination = False
+        print(f"📢 Target mode: Main channel ({target_chat})")
 
     if not bot_token or bot_token == "your_telegram_bot_token_here":
-        print("\n⚠️ TELEGRAM_BOT_TOKEN not set in .env! Cannot dispatch to Telegram.")
+        print("\n⚠️ Telegram bot token not set in .env! Cannot dispatch to Telegram.")
         print(f"However, your card was successfully rendered and saved to: {preview_file}")
         return
 
     if not target_chat or target_chat == "your_target_channel_or_chat_id_here":
-        print("\n⚠️ TARGET_CHAT_ID not set in .env! Cannot dispatch to Telegram.")
+        print("\n⚠️ Target chat ID not set in .env! Cannot dispatch to Telegram.")
         print(f"However, your card was successfully rendered and saved to: {preview_file}")
         return
 
-    print(f"\n🚀 Dispatching test pump alert to Telegram chat/channel: {target_chat}...")
+    print(f"\n🚀 Dispatching test pump alert card to Telegram chat: {target_chat}...")
     try:
         from telegram import Bot
         bot = Bot(token=bot_token)
@@ -138,6 +166,40 @@ async def main():
             parse_mode="HTML"
         )
         print(f"🎉 SUCCESS! Test pump alert posted to {target_chat} (message ID: {sent_msg.message_id})")
+        
+        # Dispatch Quantitative Risk Audit (stop-loss, resistances, squeeze flags)
+        print(f"\n🔍 Running Quantitative Derivatives Risk & Stop-Loss Audit for #{resolved}...")
+        import analyst_service
+        eval_data = {
+            "symbol": resolved if resolved != "TESTUSDT" else "BTCUSDT",
+            "priceChangePercent": test_pct,
+            "lastPrice": test_price,
+            "highPrice": test_high,
+            "lowPrice": test_low,
+            "quoteVolume": test_vol
+        }
+        eval_result = await analyst_service.evaluate_gainer(eval_data)
+        if resolved == "TESTUSDT":
+            eval_result["ticker"] = "TESTUSDT"
+            eval_result["telegram_alert"] = analyst_service.format_quantitative_risk_alert(eval_result)
+            
+        risk_alert_msg = eval_result.get("telegram_alert")
+        if risk_alert_msg:
+            print(f"🚀 Dispatching Quantitative Risk & Stop-Loss Report to Telegram chat: {target_chat}...")
+            try:
+                sent_risk = await bot.send_message(
+                    chat_id=target_chat,
+                    text=risk_alert_msg,
+                    parse_mode="HTML"
+                )
+                print(f"🎉 SUCCESS! Risk audit report posted to {target_chat} (message ID: {sent_risk.message_id})")
+            except Exception as re:
+                print(f"⚠️ HTML send failed ({re}), trying plain text fallback...")
+                import re as regex
+                clean_text = regex.sub(r'<[^>]+>', '', risk_alert_msg)
+                sent_risk = await bot.send_message(chat_id=target_chat, text=clean_text)
+                print(f"🎉 SUCCESS! Fallback plain text risk audit posted to {target_chat}")
+
     except Exception as e:
         print(f"❌ Failed to dispatch to Telegram: {e}")
         print("Tip: Make sure your bot is added as an administrator in the target channel.")

@@ -24,18 +24,18 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
-TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
-ADMIN_CHAT_ID_RAW = os.getenv("ADMIN_CHAT_ID")
-TARGET_CHAT_ID_RAW = os.getenv("TARGET_CHAT_ID")
+TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN_ME") or os.getenv("BOT_TOKEN_ME") or os.getenv("TELEGRAM_BOT_TOKEN")
+ADMIN_CHAT_ID_RAW = os.getenv("ADMIN_CHAT_ID_ME") or os.getenv("ADMIN_CHAT_ME") or os.getenv("ADMIN_CHAT_ID")
+TARGET_CHAT_ID_RAW = os.getenv("TARGET_CHAT_ID_ME") or os.getenv("TARGET_CHAT_ME") or os.getenv("TARGET_CHAT_ID")
 POLL_INTERVAL = int(os.getenv("POLL_INTERVAL", "10"))
 
 # Check if essential configurations are present
 if not TELEGRAM_BOT_TOKEN:
-    raise ValueError("TELEGRAM_BOT_TOKEN is not configured in the environment variables.")
+    raise ValueError("Neither TELEGRAM_BOT_TOKEN_ME nor TELEGRAM_BOT_TOKEN is configured in the environment variables.")
 if not ADMIN_CHAT_ID_RAW:
-    raise ValueError("ADMIN_CHAT_ID is not configured in the environment variables.")
+    raise ValueError("Neither ADMIN_CHAT_ID_ME nor ADMIN_CHAT_ID is configured in the environment variables.")
 if not TARGET_CHAT_ID_RAW:
-    raise ValueError("TARGET_CHAT_ID is not configured in the environment variables.")
+    raise ValueError("Neither TARGET_CHAT_ID_ME nor TARGET_CHAT_ID is configured in the environment variables.")
 
 # Helper to parse Chat IDs (handles integers or string usernames like @channel)
 def parse_chat_id(value: str) -> Any:
@@ -45,8 +45,8 @@ def parse_chat_id(value: str) -> Any:
     except ValueError:
         return value_str
 
-ADMIN_CHAT_ID = parse_chat_id(ADMIN_CHAT_ID_RAW)
-TARGET_CHAT_ID = parse_chat_id(TARGET_CHAT_ID_RAW)
+ADMIN_CHAT_ID = parse_chat_id(ADMIN_CHAT_ID_RAW.split(",")[0])
+TARGET_CHAT_ID = parse_chat_id(TARGET_CHAT_ID_RAW.split(",")[0])
 
 def format_price(price: float) -> str:
     """Formats prices cleanly for human readability."""

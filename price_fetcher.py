@@ -1,7 +1,7 @@
 import asyncio
 import httpx
 import logging
-from typing import List, Dict, Tuple, Optional
+from typing import List, Dict, Tuple, Optional, Any
 
 logger = logging.getLogger(__name__)
 
@@ -210,4 +210,54 @@ def is_futures_symbol_sync(symbol: str) -> bool:
     if not sym:
         return False
     return sym in _FUTURES_SYMBOLS
+
+async def fetch_24h_ticker(symbol: str) -> Optional[Dict[str, Any]]:
+    """
+    Fetches 24-hour ticker statistics for a symbol, querying both Binance Futures and Spot endpoints.
+    Returns normalized dictionary with lastPrice, highPrice, lowPrice, priceChangePercent, and quoteVolume.
+    """
+    sym = resolve_symbol(symbol).upper()
+    if not sym:
+        return None
+
+    futures_url = f"https://fapi.binance.com/fapi/v1/ticker/24hr?symbol={sym}"
+    spot_url = f"https://api.binance.com/api/v3/ticker/24hr?symbol={sym}"
+
+    async with httpx.AsyncClient(timeout=10.0) as client:
+        f_task = client.get(futures_url)
+        s_task = client.get(spot_url)
+        f_res, s_res = await asyncio.gather(f_task, s_task, return_exceptions=True)
+
+    # Prioritize Futures if available, otherwise use Spot
+    if not isinstance(f_res, Exception) and f_res.status_code == 200:
+        data = f_res.json()
+        try:
+            return {
+                "symbol": sym,
+                "priceChangePercent": float(data.get("priceChangePercent", 0.0)),
+                "lastPrice": float(data.get("lastPrice", 0.0)),
+                "highPrice": float(data.get("highPrice", 0.0)),
+                "lowPrice": float(data.get("lowPrice", 0.0)),
+                "quoteVolume": float(data.get("quoteVolume", 0.0)),
+                "source": "futures"
+            }
+        except (ValueError, TypeError):
+            pass
+
+    if not isinstance(s_res, Exception) and s_res.status_code == 200:
+        data = s_res.json()
+        try:
+            return {
+                "symbol": sym,
+                "priceChangePercent": float(data.get("priceChangePercent", 0.0)),
+                "lastPrice": float(data.get("lastPrice", 0.0)),
+                "highPrice": float(data.get("highPrice", 0.0)),
+                "lowPrice": float(data.get("lowPrice", 0.0)),
+                "quoteVolume": float(data.get("quoteVolume", 0.0)),
+                "source": "spot"
+            }
+        except (ValueError, TypeError):
+            pass
+
+    return None
 

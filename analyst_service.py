@@ -16,55 +16,58 @@ except ImportError:
     logger.warning("google.antigravity SDK not found. Fallback/Mock mode enabled for local development.")
 
 SYSTEM_INSTRUCTIONS = """
-You are an expert Quantitative Cryptocurrency Futures Analyst and Trade Signal Generator.
-Your objective is to analyze market data for top daily gainers and identify high-probability "Mean Reversion Short" (fade) signals once upward momentum shows clear structural exhaustion.
+You are a ruthless crypto derivatives risk-analyst and quantitative technical analyst. Your objective is to evaluate sudden high-volume "pulse" coins to determine if a SHORT scalp/swing is viable or if the asset is undergoing a float-cornering squeeze (like ACEUSDT or LSKUSDT).
 
-### TRADING RULES & CONFLUENCE MATRIX
-You must ONLY emit an "ENTER_SHORT" signal when at least 3 of the following 4 criteria are met:
+### Context & Rules:
+1. Shorting low-cap parabolic pulses carries asymmetric downside. Averaging down (martingale) is strictly banned.
+2. Squeeze setups are fueled by predatory float accumulation and trapped retail shorts. You must penalize setups displaying synthetic float constriction.
+3. Every trade must have clear, technical invalidation levels (stop-loss / resistance lines) beyond which the short thesis is dead.
 
-1. **Volume & Exhaustion Wick:** 
-   - A distinct blow-off top on the 15m/1h timeframe (unusually large volume spike accompanied by a long upper shadow/wick indicating absorption).
+### Analysis Framework:
+1. METRIC AUDIT & SQUEEZE DETECTOR:
+   - Metric A (OI vs. Market Cap/Volume): Calculate (Futures OI / Volume). If ratio > 0.40, flag as High Risk; if > 0.70, flag as Squeeze Inevitable.
+   - Metric B (Funding Rate): Is funding rate heavily negative (<= -0.5% per 8h or equivalent)? Negative funding indicates trapped shorts paying longs to keep pushing price up.
+   - Metric C (Spot Borrow Liquidity): Is borrow interest spiked (> 80% APR) or is borrow quota zero? If yes, physical spot arbitrage is dead.
+   - Metric D (Basis & CVD): Is Spot trading at a premium over Perp while Perp CVD shows aggressive retail selling failing to push price down?
 
-2. **Market Structure Breakdown (CHoCH):** 
-   - A clear Change of Character where price breaks below the most recent 5m or 15m Higher Low (HL) with strong sell volume, followed by a weak pullback forming a Lower High (LH).
+2. RESISTANCE & STOP-LOSS IDENTIFICATION:
+   - Identify the nearest three structural resistance levels (R1, R2, R3) using prior macro swing highs, high-volume nodes (VPVR), or Fibonacci extensions (1.272, 1.414, 1.618) of the current impulse.
+   - Designate which resistance serves as the Hard Invalidation / Stop-Loss for entry. Never suggest an entry without a fixed invalidation point.
 
-3. **Momentum Divergence:** 
-   - Bearish divergence on the 15m or 1h timeframe (Price forms a Higher High, while RSI or MACD forms a Lower High, with RSI exiting the >70 overbought zone).
+3. CONFIDENCE SCORE (0 - 100):
+   - Base Score: 70
+   - Deduct 25 points if OI/Volume > 40%.
+   - Deduct 30 points if Funding Rate <= -0.5%.
+   - Deduct 25 points if Spot Borrow is unavailable or APR > 100%.
+   - Deduct 20 points if Spot trades at an aggressive premium to Perp.
+   - Add 10-20 points ONLY if: Price reaches high-timeframe HTF resistance, Perp CVD shows long exhaustion with OI decreasing, and funding is neutral/positive.
+   - A final score < 50 means DO NOT SHORT (Execution Veto).
 
-4. **Derivative Confirmation:** 
-   - Extremely positive Funding Rate (>0.05% per 8h), Open Interest (OI) dropping on the latest push, or CVD divergence showing spot buying has flatlined.
-
----
-
-### DECISION PROTOCOL
-For every coin data payload received:
-1. **Analyze the Data:** Evaluate candle structure, recent highs/lows, RSI/indicators, and derivative metrics.
-2. **Determine Action:**
-   - If confluence criteria are MET -> Emit `ENTER_SHORT`.
-   - If price is still in a parabolic expansion making Higher Highs without breakdown -> Emit `WAIT_FOR_EXHAUSTION`.
-   - If momentum is strictly bullish continuation -> Emit `NO_TRADE`.
-
----
-
-### OUTPUT FORMAT
-You must respond strictly in valid JSON format matching this schema:
+### Required Output Format:
+Return strictly valid JSON with the following structure:
 {
-  "symbol": "COIN_USDT",
-  "decision": "ENTER_SHORT" | "WAIT_FOR_EXHAUSTION" | "NO_TRADE",
-  "confidence_score": 0-100,
-  "reasons": [
-    "Brief explanation of confluence 1",
-    "Brief explanation of confluence 2"
-  ],
-  "trade_parameters": {
-    "entry_range": [min_price, max_price],
-    "invalidation_stop_loss": exact_price,
-    "take_profit_targets": [tp1_price, tp2_price, tp3_price],
-    "risk_reward_ratio": "1:X"
+  "ticker": "{ticker}",
+  "verdict": "SHORT" | "DO_NOT_TRADE" | "SQUEEZE_ALERT",
+  "confidence_score": <number between 0 and 100>,
+  "squeeze_risk_flags": {
+    "oi_to_market_cap_ratio": <number>,
+    "funding_trap_detected": true | false,
+    "borrow_exhaustion_detected": true | false,
+    "spot_premium_divergence": true | false
   },
-  "telegram_alert": "Ready-to-post short summary for Telegram"
+  "resistance_levels": {
+    "R1_immediate": <price_float>,
+    "R2_structural": <price_float>,
+    "R3_extreme": <price_float>
+  },
+  "invalidation_stop_loss": <price_float>,
+  "execution_rules": {
+    "entry_condition": "<concise criteria for trigger>",
+    "averaging_allowed": false,
+    "primary_risk": "<1-sentence summary of the biggest failure point>"
+  },
+  "rationale": "<2-3 sentence breakdown of the decision>"
 }
-Do not return any surrounding markdown text, markdown code blocks, or additional explanation. Return only raw, valid JSON.
 """
 
 # --- Technical Indicator Helpers ---
@@ -268,7 +271,7 @@ def calculate_cvd_trend(closes: List[float], volumes: List[float], taker_buy_vol
 
 async def fetch_futures_data(symbol: str) -> Dict[str, Any]:
     """
-    Fetches real-time futures metrics (klines, funding rate, open interest) from Binance.
+    Fetches real-time futures metrics (klines, funding rate, open interest, spot price) from Binance.
     """
     base_url = "https://fapi.binance.com/fapi/v1"
     headers = {"Content-Type": "application/json"}
@@ -283,16 +286,22 @@ async def fetch_futures_data(symbol: str) -> Dict[str, Any]:
         # 4. Fetch Premium Index / Funding Rate
         funding_task = client.get(f"{base_url}/premiumIndex", params={"symbol": symbol}, headers=headers, timeout=10.0)
         # 5. Fetch Open Interest History
-        oi_task = client.get(f"{base_url}/openInterestHist", params={"symbol": symbol, "period": "5m", "limit": 12}, headers=headers, timeout=10.0)
+        oi_hist_task = client.get(f"{base_url}/openInterestHist", params={"symbol": symbol, "period": "5m", "limit": 12}, headers=headers, timeout=10.0)
+        # 6. Fetch Current Open Interest
+        oi_curr_task = client.get(f"{base_url}/openInterest", params={"symbol": symbol}, headers=headers, timeout=10.0)
+        # 7. Fetch Spot Price for Basis comparison
+        spot_task = client.get(f"https://api.binance.com/api/v3/ticker/price", params={"symbol": symbol}, headers=headers, timeout=10.0)
         
-        results = await asyncio.gather(k15_task, k1h_task, k5m_task, funding_task, oi_task, return_exceptions=True)
+        results = await asyncio.gather(k15_task, k1h_task, k5m_task, funding_task, oi_hist_task, oi_curr_task, spot_task, return_exceptions=True)
         
         data = {
             "klines_15m": [],
             "klines_1h": [],
             "klines_5m": [],
             "funding_rate": 0.0,
-            "oi_trend": "Unknown"
+            "oi_trend": "Unknown",
+            "open_interest_coins": 0.0,
+            "spot_price": None
         }
         
         # Parse 15m Klines
@@ -320,9 +329,9 @@ async def fetch_futures_data(symbol: str) -> Dict[str, Any]:
                 data["funding_rate"] = float(funding_data[0].get("lastFundingRate", 0.0))
                 
         # Parse Open Interest History
-        roi = results[4]
-        if isinstance(roi, httpx.Response) and roi.status_code == 200:
-            oi_data = roi.json()
+        roi_hist = results[4]
+        if isinstance(roi_hist, httpx.Response) and roi_hist.status_code == 200:
+            oi_data = roi_hist.json()
             if isinstance(oi_data, list) and len(oi_data) >= 2:
                 try:
                     oi_first = float(oi_data[0].get("sumOpenInterest", 0.0))
@@ -335,6 +344,23 @@ async def fetch_futures_data(symbol: str) -> Dict[str, Any]:
                         data["oi_trend"] = "Flat"
                 except Exception:
                     pass
+
+        # Parse Current Open Interest
+        roi_curr = results[5]
+        if isinstance(roi_curr, httpx.Response) and roi_curr.status_code == 200:
+            try:
+                oi_json = roi_curr.json()
+                data["open_interest_coins"] = float(oi_json.get("openInterest", 0.0))
+            except Exception:
+                pass
+
+        # Parse Spot Price
+        rspot = results[6]
+        if isinstance(rspot, httpx.Response) and rspot.status_code == 200:
+            try:
+                data["spot_price"] = float(rspot.json().get("price", 0.0))
+            except Exception:
+                pass
                     
         return data
 
@@ -344,9 +370,11 @@ def build_market_payload(symbol: str, ticker_24h: dict, futures_data: dict) -> d
     """
     Computes all indicators and constructs the finalized payload for the analyst agent.
     """
-    current_price = ticker_24h.get("lastPrice", 0.0)
-    pct_change = ticker_24h.get("priceChangePercent", 0.0)
-    high_24h = ticker_24h.get("highPrice", 0.0)
+    current_price = float(ticker_24h.get("lastPrice", 0.0))
+    pct_change = float(ticker_24h.get("priceChangePercent", 0.0))
+    high_24h = float(ticker_24h.get("highPrice", current_price))
+    low_24h = float(ticker_24h.get("lowPrice", current_price * 0.9))
+    quote_vol = float(ticker_24h.get("quoteVolume", 0.0))
     
     # 15m Indicators
     k15 = futures_data.get("klines_15m", [])
@@ -355,6 +383,8 @@ def build_market_payload(symbol: str, ticker_24h: dict, futures_data: dict) -> d
     t15_structure = "None"
     t15_wick = "None"
     t15_cvd = "None"
+    recent_high = high_24h
+    recent_low = low_24h
     
     if k15:
         closes_15m = [float(c[4]) for c in k15]
@@ -364,6 +394,9 @@ def build_market_payload(symbol: str, ticker_24h: dict, futures_data: dict) -> d
         vols_15m = [float(c[5]) for c in k15]
         taker_vols_15m = [float(c[9]) for c in k15]
         
+        recent_high = max(highs_15m[-20:]) if len(highs_15m) >= 20 else max(highs_15m)
+        recent_low = min(lows_15m[-20:]) if len(lows_15m) >= 20 else min(lows_15m)
+
         rsi_series = calculate_rsi(closes_15m)
         t15_rsi = rsi_series[-1]
         t15_divergence = detect_rsi_divergence(highs_15m, rsi_series)
@@ -388,12 +421,32 @@ def build_market_payload(symbol: str, ticker_24h: dict, futures_data: dict) -> d
         t1h_rsi = rsi_series_1h[-1]
         t1h_divergence = detect_rsi_divergence(highs_1h, rsi_series_1h)
         t1h_wick = detect_exhaustion_wick(highs_1h, lows_1h, opens_1h, closes_1h, vols_1h)
+
+    # Key Structural Resistances (Fibonacci Extensions of the impulse)
+    impulse = max(recent_high - recent_low, current_price * 0.05)
+    r1 = round(recent_high, 4)
+    r2 = round(recent_low + impulse * 1.272, 4)
+    r3 = round(recent_low + impulse * 1.618, 4)
+    invalidation_stop = round(max(r2, recent_high * 1.025), 4)
+
+    # Metrics & Squeeze Detection
+    oi_coins = futures_data.get("open_interest_coins", 0.0)
+    oi_usdt = oi_coins * current_price
+    oi_volume_ratio = round((oi_usdt / quote_vol) * 100.0, 2) if quote_vol > 0 else 0.0
+    
+    spot_price = futures_data.get("spot_price") or current_price
+    basis_pct = round(((spot_price - current_price) / current_price) * 100.0, 3) if current_price > 0 else 0.0
+    funding_rate = futures_data.get("funding_rate", 0.0)
         
     return {
+        "ticker": symbol,
         "symbol": symbol,
         "24h_change_pct": pct_change,
         "current_price": current_price,
-        "recent_high": high_24h,
+        "spot_price": spot_price,
+        "perp_price": current_price,
+        "recent_high": recent_high,
+        "recent_low": recent_low,
         "timeframe_15m": {
             "rsi": round(t15_rsi, 1),
             "rsi_divergence": t15_divergence,
@@ -406,101 +459,196 @@ def build_market_payload(symbol: str, ticker_24h: dict, futures_data: dict) -> d
             "rsi_divergence": t1h_divergence,
             "volume_wick_exhaustion": t1h_wick
         },
-        "funding_rate": futures_data.get("funding_rate", 0.0),
-        "open_interest_trend": futures_data.get("oi_trend", "Unknown")
+        "funding_rate": funding_rate,
+        "open_interest_trend": futures_data.get("oi_trend", "Unknown"),
+        "open_interest_coins": oi_coins,
+        "open_interest_usdt": oi_usdt,
+        "oi_to_volume_ratio": oi_volume_ratio,
+        "spot_basis_pct": basis_pct,
+        "resistance_levels": {
+            "R1_immediate": r1,
+            "R2_structural": r2,
+            "R3_extreme": r3
+        },
+        "invalidation_stop_loss": invalidation_stop
     }
+
+# --- Formatted Telegram Alert Generator ---
+
+def format_quantitative_risk_alert(result: dict) -> str:
+    """
+    Formats a comprehensive Quantitative Derivatives Risk & Stop-Loss Report for Telegram.
+    Uses HTML formatting so it aligns cleanly with the VIP pump alert card.
+    """
+    import html
+    ticker = result.get("ticker", result.get("symbol", "COIN"))
+    verdict = result.get("verdict", result.get("decision", "DO_NOT_TRADE"))
+    confidence = result.get("confidence_score", 0)
+    flags = result.get("squeeze_risk_flags", {})
+    resistances = result.get("resistance_levels", {})
+    stop_loss = result.get("invalidation_stop_loss", 0.0)
+    rules = result.get("execution_rules", {})
+    rationale = result.get("rationale", "")
+    current_price = result.get("current_price", 0.0)
+    
+    if verdict in ("SHORT", "ENTER_SHORT"):
+        verdict_badge = "🟢 <b>SHORT SCALP / FADE</b>"
+    elif verdict == "SQUEEZE_ALERT":
+        verdict_badge = "🚨 <b>SQUEEZE ALERT (HIGH DANGER)</b>"
+    else:
+        verdict_badge = "⚪ <b>DO NOT SHORT (EXECUTION VETO)</b>"
+
+    oi_ratio = flags.get("oi_to_market_cap_ratio", 0.0)
+    funding_trap = "⚠️ TRAP DETECTED" if flags.get("funding_trap_detected") else "✅ Normal"
+    borrow_status = "⚠️ SPIKED / DRIED UP" if flags.get("borrow_exhaustion_detected") else "✅ Available"
+    spot_prem = "⚠️ Spot Premium" if flags.get("spot_premium_divergence") else "✅ Aligned"
+
+    r1 = resistances.get("R1_immediate", 0.0)
+    r2 = resistances.get("R2_structural", 0.0)
+    r3 = resistances.get("R3_extreme", 0.0)
+    entry_cond = rules.get("entry_condition", "Wait for 15m candle close below R1 with bearish divergence")
+    primary_risk = rules.get("primary_risk", "Parabolic float squeeze / trapped retail shorts")
+
+    esc_ticker = html.escape(str(ticker))
+    esc_entry = html.escape(str(entry_cond))
+    esc_risk = html.escape(str(primary_risk))
+    esc_rationale = html.escape(str(rationale))
+
+    text = (
+        f"⚡ <b>QUANTITATIVE RISK & SQUEEZE AUDIT: #{esc_ticker}</b> ⚡\n\n"
+        f"🎯 <b>Verdict:</b> {verdict_badge} (Score: <b>{confidence}/100</b>)\n"
+        f"💵 <b>Current Price:</b> <code>${current_price:,.4f}</code>\n"
+        f"🛑 <b>Hard Invalidation (Stop-Loss):</b> <code>${stop_loss:,.4f}</code>\n\n"
+        f"📊 <b>Structural Resistance Levels:</b>\n"
+        f"• <b>R1 (Immediate):</b> <code>${r1:,.4f}</code>\n"
+        f"• <b>R2 (Structural 1.272):</b> <code>${r2:,.4f}</code>\n"
+        f"• <b>R3 (Extreme 1.618):</b> <code>${r3:,.4f}</code>\n\n"
+        f"⚠️ <b>Squeeze Risk Flags:</b>\n"
+        f"• <b>OI / Volume Ratio:</b> <code>{oi_ratio:.1f}%</code>\n"
+        f"• <b>Funding Trap:</b> <code>{funding_trap}</code>\n"
+        f"• <b>Spot Borrow:</b> <code>{borrow_status}</code>\n"
+        f"• <b>Spot/Perp Basis:</b> <code>{spot_prem}</code>\n\n"
+        f"📋 <b>Execution Rules:</b>\n"
+        f"• <b>Entry:</b> {esc_entry}\n"
+        f"• <b>Martingale / Averaging:</b> 🚫 <b>Strictly Banned</b>\n"
+        f"• <b>Primary Risk:</b> {esc_risk}\n\n"
+        f"💡 <b>Quantitative Rationale:</b>\n"
+        f"<i>{esc_rationale}</i>"
+    )
+    return text
 
 # --- Fallback Mock Agent for Development ---
 
 def generate_mock_decision(payload: dict) -> dict:
     """
     Executes local quantitative evaluation of criteria and generates a valid mock JSON response.
-    Used when the google.antigravity SDK is not available.
+    Implements the full Squeeze Detector and Risk Scoring rules.
     """
-    symbol = payload["symbol"]
-    price = payload["current_price"]
+    ticker = payload.get("ticker", payload.get("symbol", "COIN"))
+    price = payload.get("current_price", 0.0)
+    funding_rate = payload.get("funding_rate", 0.0)
+    oi_ratio = payload.get("oi_to_volume_ratio", 0.0)
+    basis_pct = payload.get("spot_basis_pct", 0.0)
+    oi_trend = payload.get("open_interest_trend", "Unknown")
     
-    # Evaluate criteria count
-    criteria_met = []
-    
-    # 1. Volume & Exhaustion Wick
     wick_15m = payload["timeframe_15m"]["volume_wick_exhaustion"]
     wick_1h = payload["timeframe_1h"]["volume_wick_exhaustion"]
-    if wick_15m != "None" or wick_1h != "None":
-        criteria_met.append("Volume & Exhaustion Wick: Large blow-off wick on volume spike detected.")
-        
-    # 2. Market Structure Breakdown (CHoCH)
-    structure = payload["timeframe_15m"]["market_structure"]
-    if "Broken below" in structure:
-        criteria_met.append("Market Structure Breakdown (CHoCH): Price broke latest Higher Low and forms Lower High.")
-        
-    # 3. Momentum Divergence
     div_15m = payload["timeframe_15m"]["rsi_divergence"]
     div_1h = payload["timeframe_1h"]["rsi_divergence"]
-    if div_15m != "None" or div_1h != "None" or payload["timeframe_15m"]["rsi"] > 70.0:
-        criteria_met.append("Momentum Divergence: Bearish RSI divergence or overbought RSI levels.")
+    structure = payload["timeframe_15m"]["market_structure"]
+    rsi_15m = payload["timeframe_15m"]["rsi"]
+
+    # Base Score: 70
+    score = 70
+    
+    # 1. Metric A (OI vs Volume/Market Cap): > 40% deduct 25 pts
+    high_oi_risk = oi_ratio > 40.0
+    if high_oi_risk:
+        score -= 25
         
-    # 4. Derivative Confirmation
-    fr = payload["funding_rate"]
-    oi = payload["open_interest_trend"]
-    cvd = payload["timeframe_15m"]["cvd_trend"]
-    if fr > 0.0005 or oi == "Declining from peak" or "Bearish CVD Divergence" in cvd:
-        criteria_met.append(f"Derivative Confirmation: Funding rate: {fr*100:.3f}%, OI: {oi}, CVD: {cvd}.")
+    # 2. Metric B (Funding Rate): <= -0.5% per 8h (-0.005) deduct 30 pts (funding trap)
+    funding_trap = funding_rate <= -0.005
+    if funding_trap:
+        score -= 30
+        
+    # 3. Metric C (Spot Borrow Liquidity): deduct 25 pts if funding deeply negative
+    borrow_exhausted = funding_trap or (funding_rate < -0.002)
+    if borrow_exhausted:
+        score -= 25
+        
+    # 4. Metric D (Basis & CVD): Spot premium over Perp > 0.4% deduct 20 pts
+    spot_premium = basis_pct > 0.4
+    if spot_premium:
+        score -= 20
+        
+    # Add points ONLY if technical exhaustions are confirmed:
+    if wick_15m != "None" or wick_1h != "None":
+        score += 10
+    if div_15m != "None" or div_1h != "None" or rsi_15m > 72.0:
+        score += 10
+    if oi_trend == "Declining from peak":
+        score += 10
+    if "Broken below" in structure:
+        score += 10
 
-    # Make decision based on confluence
-    confidence = 0
-    decision = "NO_TRADE"
-    
-    if len(criteria_met) >= 3:
-        decision = "ENTER_SHORT"
-        confidence = min(60 + len(criteria_met) * 10, 95)
-    elif len(criteria_met) == 2 or payload["timeframe_15m"]["rsi"] > 68.0:
-        decision = "WAIT_FOR_EXHAUSTION"
-        confidence = 50
+    score = max(0, min(score, 100))
+
+    # Resistances
+    resistances = payload.get("resistance_levels", {
+        "R1_immediate": round(price * 1.02, 4),
+        "R2_structural": round(price * 1.05, 4),
+        "R3_extreme": round(price * 1.09, 4)
+    })
+    invalidation_stop = payload.get("invalidation_stop_loss", round(resistances["R2_structural"] * 1.01, 4))
+
+    # Determine Verdict
+    if score >= 50:
+        verdict = "SHORT"
+        entry_cond = f"Wait for 15m candle close below R1 (${resistances['R1_immediate']:,.4f}) with bearish RSI divergence"
+        primary_risk = "Continuation breakout above structural R2 if volume re-expands"
+        rationale = f"Impulse shows clear structural exhaustion at ${price:,.4f} with fading volume and declining OI. Funding is neutral/positive and key confluences support a mean reversion short toward prior structural support."
     else:
-        decision = "NO_TRADE"
-        confidence = 20
+        if funding_trap or high_oi_risk or spot_premium:
+            verdict = "SQUEEZE_ALERT"
+            entry_cond = "Strictly VETOED: Synthetic float constriction / predatory squeeze underway"
+            primary_risk = "Float-cornering short squeeze fueled by trapped retail shorts paying funding"
+            rationale = f"Asset exhibits critical squeeze mechanics (OI/Volume ratio {oi_ratio:.1f}%, Funding {funding_rate*100:.3f}%). Do not attempt to short parabolic pulse; upside risk is asymmetric."
+        else:
+            verdict = "DO_NOT_TRADE"
+            entry_cond = "Awaiting confirmed market structure breakdown (CHoCH) or clear exhaustion wick"
+            primary_risk = "Strong bullish continuation without confirmed exhaustion signals"
+            rationale = f"Confluence criteria insufficient for a high-probability mean-reversion short (Score: {score}/100). Upward momentum remains intact."
 
-    # Calculate stop loss (strictly above recent high wick with 1% buffer)
-    stop_loss = round(payload["recent_high"] * 1.01, 4)
-    tp1 = round(price * 0.95, 4)
-    tp2 = round(price * 0.92, 4)
-    tp3 = round(price * 0.88, 4)
-    
-    risk_reward = "1:2.5"
-    if stop_loss > price:
-        risk = stop_loss - price
-        reward = price - tp2
-        risk_reward = f"1:{reward / risk:.1f}"
-
-    reasons = criteria_met if criteria_met else ["No clear bearish reversion triggers detected."]
-    
-    alert = (
-        f"⚡ *CRITICAL SHORT ALERT: {symbol}* ⚡\n\n"
-        f"• *Decision*: {decision} (Confidence: {confidence}%)\n"
-        f"• *Current Price*: ${price:,.4f}\n"
-        f"• *Entry Range*: ${price*0.995:,.4f} - ${price*1.005:,.4f}\n"
-        f"• *Stop Loss*: ${stop_loss:,.4f} (Above recent high)\n"
-        f"• *Take Profits*: ${tp1:,.4f} | ${tp2:,.4f} | ${tp3:,.4f}\n"
-        f"• *Risk Reward*: {risk_reward}\n\n"
-        f"🔍 *Confluences*:\n" + "\n".join([f"  - {r}" for r in reasons])
-    )
-    # Escape underscores to prevent Telegram Markdown parsing entities error
-    alert = alert.replace('_', '\\_')
-
-    return {
-        "symbol": symbol,
-        "decision": decision,
-        "confidence_score": confidence,
-        "reasons": reasons,
+    result = {
+        "ticker": ticker,
+        "symbol": ticker,
+        "verdict": verdict,
+        "decision": verdict,
+        "confidence_score": score,
+        "current_price": price,
+        "squeeze_risk_flags": {
+            "oi_to_market_cap_ratio": oi_ratio,
+            "funding_trap_detected": funding_trap,
+            "borrow_exhaustion_detected": borrow_exhausted,
+            "spot_premium_divergence": spot_premium
+        },
+        "resistance_levels": resistances,
+        "invalidation_stop_loss": invalidation_stop,
+        "execution_rules": {
+            "entry_condition": entry_cond,
+            "averaging_allowed": False,
+            "primary_risk": primary_risk
+        },
         "trade_parameters": {
             "entry_range": [round(price * 0.995, 4), round(price * 1.005, 4)],
-            "invalidation_stop_loss": stop_loss,
-            "take_profit_targets": [tp1, tp2, tp3],
-            "risk_reward_ratio": risk_reward
+            "invalidation_stop_loss": invalidation_stop,
+            "take_profit_targets": [round(price * 0.95, 4), round(price * 0.92, 4), round(price * 0.88, 4)],
+            "risk_reward_ratio": f"1:{max(1.5, (price - price * 0.92) / max(0.0001, invalidation_stop - price)):.1f}"
         },
-        "telegram_alert": alert
+        "rationale": rationale
     }
+    result["telegram_alert"] = format_quantitative_risk_alert(result)
+    return result
 
 # --- Main Evaluation Entrypoint ---
 
@@ -510,7 +658,7 @@ async def evaluate_gainer(ticker_data: dict) -> dict:
     Fetches futures data, builds payload, runs the AI analyst agent, and returns the signal decision.
     """
     symbol = ticker_data["symbol"]
-    logger.info(f"Evaluating {symbol} for Mean Reversion Short signal...")
+    logger.info(f"Evaluating {symbol} for Quantitative Risk & Squeeze signal...")
     
     try:
         # Fetch futures metrics
@@ -559,9 +707,16 @@ async def evaluate_gainer(ticker_data: dict) -> dict:
                     raw_text = "\n".join(lines[1:-1]).strip()
                     
             result = json.loads(raw_text)
-            if "telegram_alert" in result and isinstance(result["telegram_alert"], str):
-                # Escape underscores to prevent Telegram Markdown parsing entities error
-                result["telegram_alert"] = result["telegram_alert"].replace('_', '\\_')
+            result["current_price"] = payload.get("current_price", 0.0)
+            if "ticker" not in result:
+                result["ticker"] = symbol
+            if "symbol" not in result:
+                result["symbol"] = symbol
+            if "decision" not in result and "verdict" in result:
+                result["decision"] = result["verdict"]
+                
+            # Always ensure telegram_alert is populated with our rich HTML formatter
+            result["telegram_alert"] = format_quantitative_risk_alert(result)
             return result
             
     except Exception as e:
@@ -571,16 +726,33 @@ async def evaluate_gainer(ticker_data: dict) -> dict:
             return generate_mock_decision(payload)
         except Exception as mock_err:
             logger.error(f"Fallback mock generator also failed for {symbol}: {mock_err}")
-            return {
+            current_price = float(ticker_data.get("lastPrice", 0.0))
+            err_result = {
+                "ticker": symbol,
                 "symbol": symbol,
+                "verdict": "DO_NOT_TRADE",
                 "decision": "NO_TRADE",
                 "confidence_score": 0,
-                "reasons": [f"Evaluation error: {str(e)}"],
-                "trade_parameters": {
-                    "entry_range": [0, 0],
-                    "invalidation_stop_loss": 0,
-                    "take_profit_targets": [0, 0, 0],
-                    "risk_reward_ratio": "1:0"
+                "current_price": current_price,
+                "squeeze_risk_flags": {
+                    "oi_to_market_cap_ratio": 0.0,
+                    "funding_trap_detected": False,
+                    "borrow_exhaustion_detected": False,
+                    "spot_premium_divergence": False
                 },
-                "telegram_alert": f"⚠️ Error evaluating {symbol}: {str(e)}".replace('_', '\\_')
+                "resistance_levels": {
+                    "R1_immediate": current_price,
+                    "R2_structural": current_price,
+                    "R3_extreme": current_price
+                },
+                "invalidation_stop_loss": current_price,
+                "execution_rules": {
+                    "entry_condition": "Evaluation error",
+                    "averaging_allowed": False,
+                    "primary_risk": f"Error: {str(e)}"
+                },
+                "rationale": f"Evaluation failed: {str(e)}"
             }
+            err_result["telegram_alert"] = format_quantitative_risk_alert(err_result)
+            return err_result
+

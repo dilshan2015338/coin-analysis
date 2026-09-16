@@ -29,6 +29,30 @@ def parse_chat_id(value: str) -> Any:
 
 TARGET_CHAT_ID = parse_chat_id(TARGET_CHAT_ID_RAW)
 
+# Personal "ME" Channel & Bot Configuration (for detailed pulse + stop-loss/squeeze alerts)
+TARGET_CHAT_ID_ME_RAW = os.getenv("TARGET_CHAT_ID_ME") or os.getenv("TARGET_CHAT_ME")
+TARGET_CHAT_ID_ME = parse_chat_id(TARGET_CHAT_ID_ME_RAW) if TARGET_CHAT_ID_ME_RAW else None
+
+TELEGRAM_BOT_TOKEN_ME = os.getenv("TELEGRAM_BOT_TOKEN_ME") or os.getenv("BOT_TOKEN_ME")
+ADMIN_CHAT_ID_ME_RAW = os.getenv("ADMIN_CHAT_ID_ME") or os.getenv("ADMIN_CHAT_ME")
+ADMIN_CHAT_ID_ME = parse_chat_id(ADMIN_CHAT_ID_ME_RAW) if ADMIN_CHAT_ID_ME_RAW else None
+
+def get_me_bot(default_bot=None):
+    """Returns a telegram.Bot instance for the personal ME token, or default_bot if not set."""
+    token = os.getenv("TELEGRAM_BOT_TOKEN_ME") or os.getenv("BOT_TOKEN_ME") or TELEGRAM_BOT_TOKEN_ME
+    if token:
+        try:
+            from telegram import Bot
+            return Bot(token=token)
+        except Exception as e:
+            logger.error(f"Error initializing ME bot: {e}")
+    return default_bot
+
+def get_me_target_chat_id():
+    """Returns the parsed TARGET_CHAT_ID_ME, refreshing from environment if updated."""
+    raw = os.getenv("TARGET_CHAT_ID_ME") or os.getenv("TARGET_CHAT_ME") or TARGET_CHAT_ID_ME_RAW
+    return parse_chat_id(raw) if raw else None
+
 # Toggle to enable/disable automated trade signal alerts (e.g. CRITICAL SHORT / LONG alerts)
 # Temporarily disabled per user request. Set to True or set ENABLE_TRADE_ALERTS=true in .env to re-enable.
 ENABLE_TRADE_SIGNAL_ALERTS = os.getenv("ENABLE_TRADE_ALERTS", "false").lower() in ("true", "1", "yes")
@@ -400,7 +424,59 @@ async def run_gainer_scanner(application: Any):
                     except Exception as pte:
                         logger.error(f"Failed plain text pump alert for {symbol}: {pte}")
 
-            # Run Mean Reversion Short Analyst signal evaluation
+            # --- Personal "ME" Channel Dispatch ---
+            # Send the pulse message (photo card + caption) AND the full quantitative stop-loss/squeeze audit
+            me_target = get_me_target_chat_id()
+            if me_target:
+                me_bot = get_me_bot(default_bot=application.bot)
+                try:
+                    # 1. Send the pulse card graphic & caption to the personal ME channel
+                    if card_bytes:
+                        card_bytes.seek(0)
+                        await me_bot.send_photo(
+                            chat_id=me_target,
+                            photo=card_bytes,
+                            caption=msg,
+                            parse_mode="HTML"
+                        )
+                    else:
+                        await me_bot.send_message(
+                            chat_id=me_target,
+                            text=msg,
+                            parse_mode="HTML"
+                        )
+                    logger.info(f"Dispatched VIP pulse alert to personal ME channel ({me_target}) for {symbol}")
+
+                    # 2. Run Quantitative Risk Analyst & Squeeze Detector
+                    import analyst_service
+                    eval_data = {
+                        "symbol": symbol,
+                        "priceChangePercent": current_pct,
+                        "lastPrice": current_price,
+                        "highPrice": high_24h,
+                        "lowPrice": low_24h,
+                        "quoteVolume": volume_24h
+                    }
+                    eval_result = await analyst_service.evaluate_gainer(eval_data)
+                    risk_alert = eval_result.get("telegram_alert")
+                    if risk_alert:
+                        try:
+                            await me_bot.send_message(
+                                chat_id=me_target,
+                                text=risk_alert,
+                                parse_mode="HTML"
+                            )
+                            logger.info(f"Dispatched quantitative risk audit with stop-loss details to personal ME channel for {symbol}")
+                        except Exception as m_err:
+                            logger.warning(f"HTML send failed for quantitative risk alert ({m_err}), trying plain text...")
+                            import re
+                            plain_alert = re.sub(r'<[^>]+>', '', risk_alert)
+                            await me_bot.send_message(chat_id=me_target, text=plain_alert)
+
+                except Exception as me_err:
+                    logger.error(f"Failed to dispatch pulse and risk alert to ME channel ({me_target}): {me_err}", exc_info=True)
+
+            # Run Mean Reversion Short Analyst signal evaluation for Main Channel
             # (Temporarily disabled per user request - set ENABLE_TRADE_SIGNAL_ALERTS = True to re-enable)
             if ENABLE_TRADE_SIGNAL_ALERTS:
                 try:
@@ -417,19 +493,20 @@ async def run_gainer_scanner(application: Any):
                     decision = eval_result.get("decision", "NO_TRADE")
                     logger.info(f"Analyst evaluation for {symbol}: decision={decision}, confidence={eval_result.get('confidence_score')}%")
                     
-                    if decision in ("ENTER_SHORT", "ENTER_LONG"):
+                    if decision in ("ENTER_SHORT", "ENTER_LONG", "SHORT"):
                         short_alert_msg = eval_result.get("telegram_alert")
                         if short_alert_msg:
                             try:
                                 await application.bot.send_message(
                                     chat_id=TARGET_CHAT_ID,
                                     text=short_alert_msg,
-                                    parse_mode="Markdown"
+                                    parse_mode="HTML"
                                 )
-                                logger.info(f"Dispatched trade signal alert for {symbol} to Telegram.")
+                                logger.info(f"Dispatched trade signal alert for {symbol} to Main Telegram channel.")
                             except Exception as sme:
-                                logger.warning(f"Markdown send failed for trade alert ({sme}), falling back to plain text...")
-                                clean_short = short_alert_msg.replace('*', '').replace('`', '').replace('_', '')
+                                logger.warning(f"HTML send failed for trade alert ({sme}), falling back to plain text...")
+                                import re
+                                clean_short = re.sub(r'<[^>]+>', '', short_alert_msg)
                                 await application.bot.send_message(
                                     chat_id=TARGET_CHAT_ID,
                                     text=clean_short

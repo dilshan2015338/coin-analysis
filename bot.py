@@ -23,9 +23,9 @@ from config_parser import parse_message_command
 logger = logging.getLogger(__name__)
 
 # Load configurations
-ADMIN_CHAT_ID_RAW = os.getenv("ADMIN_CHAT_ID")
+ADMIN_CHAT_ID_RAW = os.getenv("ADMIN_CHAT_ID_ME") or os.getenv("ADMIN_CHAT_ME") or os.getenv("ADMIN_CHAT_ID")
 if not ADMIN_CHAT_ID_RAW:
-    raise ValueError("ADMIN_CHAT_ID is not configured in the environment variables.")
+    raise ValueError("Neither ADMIN_CHAT_ID_ME nor ADMIN_CHAT_ID is configured in the environment variables.")
 
 MARKET_ANALYZER_URL = os.getenv("MARKET_ANALYZER_URL", "http://127.0.0.1:8000/api/v1/analyze")
 MARKET_ANALYZER_API_KEY = os.getenv("MARKET_ANALYZER_API_KEY", "lF2vIg=Pik8S_(^iC8$23H&fBz$4h7L6-rOCiZ*x&a#bjvp+(fF_9hTII5aul@gq")
@@ -37,7 +37,24 @@ def parse_chat_id(value: str) -> Any:
     except ValueError:
         return value_str
 
-ADMIN_CHAT_ID = parse_chat_id(ADMIN_CHAT_ID_RAW)
+ADMIN_CHAT_ID = parse_chat_id(ADMIN_CHAT_ID_RAW.split(",")[0])
+
+def get_authorized_chat_ids() -> set:
+    """
+    Returns a set of authorized chat/group IDs parsed from environment variables:
+    - ADMIN_CHAT_ID (supports comma-separated list of IDs)
+    - ADMIN_CHAT_ID_ME / ADMIN_CHAT_ME (new group / personal group)
+    - ALLOWED_CHAT_IDS (optional comma-separated list)
+    """
+    chat_ids = set()
+    for var in ("ADMIN_CHAT_ID", "ADMIN_CHAT_ID_ME", "ADMIN_CHAT_ME", "ALLOWED_CHAT_IDS"):
+        raw_val = os.getenv(var, "")
+        if raw_val:
+            for piece in raw_val.split(","):
+                clean = piece.strip()
+                if clean:
+                    chat_ids.add(parse_chat_id(clean))
+    return chat_ids
 
 def format_price(price: float) -> str:
     """Formats prices cleanly for human readability."""
@@ -49,16 +66,19 @@ def format_price(price: float) -> str:
         return f"${price:,.6f}"
 
 async def handle_admin_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Listens to text updates, filters for the admin chat, and parses commands."""
+    """Listens to text updates, filters for authorized chats, and parses commands."""
     msg = update.message or update.channel_post
     if not msg or not msg.text:
         return
 
-    # Filter out messages from non-admin chats
-    if msg.chat.id != ADMIN_CHAT_ID:
+    # Check against authorized chats (ADMIN_CHAT_ID, ADMIN_CHAT_ID_ME, etc.)
+    authorized_chats = get_authorized_chat_ids()
+    if msg.chat.id not in authorized_chats:
+        logger.debug(f"Ignoring message from unauthorized chat: {msg.chat.id}")
         return
 
-    logger.info(f"Received admin command message: {msg.text} in chat {msg.chat.id}")
+    chat_title = getattr(msg.chat, 'title', None) or getattr(msg.chat, 'username', None) or 'Direct/Private'
+    logger.info(f"Received command message: '{msg.text}' from chat {msg.chat.id} ({chat_title})")
 
     try:
         command = parse_message_command(msg.text)
@@ -455,171 +475,133 @@ async def handle_admin_message(update: Update, context: ContextTypes.DEFAULT_TYP
 
                 await msg.reply_text(response, parse_mode="Markdown")
 
-        elif cmd_type == "short_status":
+        elif cmd_type in ("short_status", "evaluate"):
             user_symbol = command["symbol"]
             resolved = price_fetcher.resolve_symbol(user_symbol)
-            
-            # Fetch price to verify symbol validity
-            prices = await price_fetcher.fetch_prices([resolved])
-            if resolved not in prices:
-                await msg.reply_text(f"❌ Could not find price for *{user_symbol}* on Binance.", parse_mode="Markdown")
-                return
-            
-            status_msg = await msg.reply_text(f"⏳ Querying data and evaluating short reversion signal for *{user_symbol}* ({resolved})...", parse_mode="Markdown")
-            
+
+            status_msg = await msg.reply_text(f"⏳ Querying data and evaluating short reversion signal for <b>#{user_symbol}</b> (<code>{resolved}</code>)...", parse_mode="HTML")
+
             try:
-                ticker_24h = {}
-                async with httpx.AsyncClient() as client:
-                    resp = await client.get(f"https://api.binance.com/api/v3/ticker/24hr?symbol={resolved}", timeout=10.0)
-                    if resp.status_code == 200:
-                        t_data = resp.json()
+                ticker_24h = await price_fetcher.fetch_24h_ticker(resolved)
+                if not ticker_24h:
+                    prices = await price_fetcher.fetch_prices([resolved])
+                    if resolved in prices:
+                        current_price = prices[resolved]
                         ticker_24h = {
                             "symbol": resolved,
-                            "priceChangePercent": float(t_data.get("priceChangePercent", 0.0)),
-                            "lastPrice": float(t_data.get("lastPrice", 0.0)),
-                            "highPrice": float(t_data.get("highPrice", 0.0)),
-                            "lowPrice": float(t_data.get("lowPrice", 0.0)),
-                            "quoteVolume": float(t_data.get("quoteVolume", 0.0))
+                            "priceChangePercent": 0.0,
+                            "lastPrice": current_price,
+                            "highPrice": current_price,
+                            "lowPrice": current_price,
+                            "quoteVolume": 0.0,
+                            "source": "spot"
                         }
-                
-                if not ticker_24h:
-                    current_price = prices[resolved]
-                    ticker_24h = {
-                        "symbol": resolved,
-                        "priceChangePercent": 0.0,
-                        "lastPrice": current_price,
-                        "highPrice": current_price,
-                        "lowPrice": current_price,
-                        "quoteVolume": 0.0
-                    }
-                    
+                    else:
+                        await status_msg.edit_text(f"❌ Could not find active market price for <b>#{user_symbol}</b> on Binance.", parse_mode="HTML")
+                        return
+
                 eval_result = await analyst_service.evaluate_gainer(ticker_24h)
                 alert_text = eval_result.get("telegram_alert")
                 if alert_text:
-                    await status_msg.edit_text(alert_text, parse_mode="Markdown")
+                    try:
+                        await status_msg.edit_text(alert_text, parse_mode="HTML")
+                    except Exception as he:
+                        logger.warning(f"HTML format edit failed ({he}), sending clean text...")
+                        import re
+                        clean_text = re.sub(r'<[^>]+>', '', alert_text)
+                        await status_msg.edit_text(clean_text)
                 else:
-                    await status_msg.edit_text(f"❌ Evaluation returned empty alert for *{user_symbol}*.", parse_mode="Markdown")
+                    await status_msg.edit_text(f"❌ Evaluation returned empty alert for <b>#{user_symbol}</b>.", parse_mode="HTML")
             except Exception as e:
                 logger.error(f"Error evaluating {resolved} on short_status command: {e}", exc_info=True)
-                await status_msg.edit_text(f"❌ Error during evaluation of *{user_symbol}*: {str(e)}", parse_mode="Markdown")
+                await status_msg.edit_text(f"❌ Error during evaluation of <b>#{user_symbol}</b>: {html.escape(str(e))}", parse_mode="HTML")
 
         elif cmd_type == "analyze":
             user_symbol = command["symbol"]
             resolved = price_fetcher.resolve_symbol(user_symbol)
 
-            # Check if resolved is in watched or just look up on Binance to make sure it's valid
-            prices = await price_fetcher.fetch_prices([resolved])
-            if resolved not in prices:
-                await msg.reply_text(f"❌ Could not find price for *{user_symbol}* on Binance.", parse_mode="Markdown")
-                return
-
-            status_msg = await msg.reply_text(f"⏳ Running market analysis for *{user_symbol}* ({resolved})...", parse_mode="Markdown")
-
-            def format_for_analyzer(resolved_symbol: str) -> str:
-                # standard quote assets
-                for suffix in ("USDT", "USDC", "BUSD", "BTC", "ETH", "EUR", "TRY", "FDUSD"):
-                    if resolved_symbol.endswith(suffix) and len(resolved_symbol) > len(suffix):
-                        base = resolved_symbol[:-len(suffix)]
-                        return f"{base}/{suffix}"
-                return resolved_symbol
-
-            formatted_sym = format_for_analyzer(resolved)
-
-            payload = {
-                "symbol": formatted_sym,
-                "exchange": "binance",
-                "timeframes": ["15m", "1h", "4h"],
-                "include_reasoning": True,
-                "force_refresh": False
-            }
-
-            headers = {
-                "X-API-Key": MARKET_ANALYZER_API_KEY
-            }
+            status_msg = await msg.reply_text(
+                f"⏳ Running Quantitative Risk & Squeeze Audit for <b>#{user_symbol}</b> (<code>{resolved}</code>)...",
+                parse_mode="HTML"
+            )
 
             try:
-                async with httpx.AsyncClient() as client:
-                    resp = await client.post(MARKET_ANALYZER_URL, json=payload, headers=headers, timeout=20.0)
-                    if resp.status_code == 403:
-                        await status_msg.edit_text("❌ *Authorization Error*: Invalid X-API-Key configured for the Market Analyzer API.", parse_mode="Markdown")
+                # 1. Fetch 24h ticker data (handles both Binance Futures & Spot assets)
+                ticker_24h = await price_fetcher.fetch_24h_ticker(resolved)
+                if not ticker_24h:
+                    prices = await price_fetcher.fetch_prices([resolved])
+                    if resolved in prices:
+                        current_price = prices[resolved]
+                        ticker_24h = {
+                            "symbol": resolved,
+                            "priceChangePercent": 0.0,
+                            "lastPrice": current_price,
+                            "highPrice": current_price,
+                            "lowPrice": current_price,
+                            "quoteVolume": 0.0,
+                            "source": "spot"
+                        }
+                    else:
+                        await status_msg.edit_text(f"❌ Could not find market data for <b>#{user_symbol}</b> on Binance Spot or Futures.", parse_mode="HTML")
                         return
-                    elif resp.status_code != 200:
-                        await status_msg.edit_text(f"❌ *API Error*: Server returned status code {resp.status_code}.", parse_mode="Markdown")
-                        return
 
-                    data = resp.json()
+                current_price = float(ticker_24h.get("lastPrice", 0.0))
+                change_pct = float(ticker_24h.get("priceChangePercent", 0.0))
+                high_24h = float(ticker_24h.get("highPrice", current_price))
+                low_24h = float(ticker_24h.get("lowPrice", current_price))
+                volume_24h = float(ticker_24h.get("quoteVolume", 0.0))
 
-                    # Extract values safely
-                    symbol_res = data.get("symbol", formatted_sym)
-                    regime = data.get("market_regime", "N/A")
-                    reasoning = data.get("reasoning_summary", "N/A")
-                    risk_warning = data.get("risk_warning", "N/A")
-                    exec_time = data.get("execution_time_ms", 0) / 1000.0
+                # 2. Run Quantitative Risk & Squeeze Audit
+                eval_result = await analyst_service.evaluate_gainer(ticker_24h)
+                risk_alert_text = eval_result.get("telegram_alert")
 
-                    signals = data.get("microstructure_signals", {})
-                    liq_hunt = "True" if signals.get("liquidity_hunt_detected") else "False"
-                    liq_type = signals.get("liquidity_hunt_type", "NONE")
-                    pump_risk = signals.get("pump_risk_level", "LOW")
-                    sentiment = signals.get("funding_oi_sentiment", "Neutral")
-                    imbalance = signals.get("orderbook_imbalance_ratio", 0.0)
-
-                    rec = data.get("trade_recommendation", {})
-                    rec_action = rec.get("action", "HOLD")
-                    rec_lev = rec.get("recommended_leverage_max", 1)
-                    rec_rr = rec.get("risk_reward_ratio", 0.0)
-
-                    preds = data.get("predictions", {})
-
-                    def format_pred(pred_data):
-                        if not pred_data:
-                            return "_No prediction data available_"
-                        bias = pred_data.get("bias", "NEUTRAL")
-                        conf = pred_data.get("confidence", 0.0) * 100
-                        target = pred_data.get("target_price")
-                        invalidation = pred_data.get("invalidation_price")
-                        driver = pred_data.get("key_driver", "N/A")
-
-                        target_str = format_price(target) if target else "N/A"
-                        inv_str = format_price(invalidation) if invalidation else "N/A"
-
-                        return (
-                            f"`{bias}` (Confidence: {conf:.1f}%)\n"
-                            f"  - Target: *{target_str}* | Invalid: *{inv_str}*\n"
-                            f"  - Key Driver: {driver}"
-                        )
-
-                    pred_15m = format_pred(preds.get("next_15m"))
-                    pred_1h = format_pred(preds.get("next_1h"))
-                    pred_4h = format_pred(preds.get("next_4h"))
-
-                    analysis_response = (
-                        f"📊 *Market Analysis: {symbol_res}* 📊\n"
-                        f"🕒 *Execution:* {exec_time:.2f}s\n\n"
-                        f"📈 *Market Regime:* `{regime}`\n\n"
-                        f"🔍 *Microstructure Signals:*\n"
-                        f"• Liquidity Hunt: *{liq_hunt}* (Type: `{liq_type}`)\n"
-                        f"• Pump Risk Level: *{pump_risk}*\n"
-                        f"• Funding/OI Sentiment: *{sentiment}*\n"
-                        f"• Orderbook Imbalance: *{imbalance:.2f}*\n\n"
-                        f"💡 *Trade Recommendation:*\n"
-                        f"• Action: *{rec_action}*\n"
-                        f"• Max Leverage: *{rec_lev}x*\n"
-                        f"• Risk/Reward Ratio: *{rec_rr:.2f}*\n\n"
-                        f"🔮 *Predictions:*\n"
-                        f"• *15m Bias:* {pred_15m}\n"
-                        f"• *1h Bias:* {pred_1h}\n"
-                        f"• *4h Bias:* {pred_4h}\n\n"
-                        f"📝 *Reasoning Summary:*\n"
-                        f"_{reasoning}_\n\n"
-                        f"⚠️ *Risk Warning:*\n"
-                        f"_{risk_warning}_"
+                # 3. Render and dispatch VIP Alert Card + 15M Candlestick Chart graphic
+                try:
+                    market_type = await price_fetcher.get_market_type(resolved)
+                    card_bytes, _ = await card_service.generate_combined_alert(
+                        symbol=resolved,
+                        current_pct=change_pct,
+                        current_price=current_price,
+                        high_24h=high_24h,
+                        low_24h=low_24h,
+                        volume_24h=volume_24h,
+                        multiplier=1.5,
+                        market_type=market_type
                     )
+                    if card_bytes:
+                        verdict = eval_result.get("verdict", "ANALYZE")
+                        score = eval_result.get("confidence_score", 0)
+                        card_caption = (
+                            f"📊 <b>#{resolved} Quantitative Market Analysis</b>\n"
+                            f"🎯 <b>Verdict:</b> {verdict} (Score: <b>{score}/100</b>)\n"
+                            f"💵 <b>Price:</b> <code>${current_price:,.4f}</code> ({change_pct:+.2f}%)"
+                        )
+                        card_bytes.seek(0)
+                        await context.bot.send_photo(
+                            chat_id=msg.chat.id,
+                            photo=card_bytes,
+                            caption=card_caption,
+                            parse_mode="HTML"
+                        )
+                except Exception as card_err:
+                    logger.warning(f"VIP Chart card rendering skipped for {resolved}: {card_err}")
 
-                    await status_msg.edit_text(analysis_response, parse_mode="Markdown")
+                # 4. Deliver the Full Quantitative Risk & Stop-Loss Audit Report to the group
+                if risk_alert_text:
+                    try:
+                        await status_msg.edit_text(risk_alert_text, parse_mode="HTML")
+                    except Exception as he:
+                        logger.warning(f"HTML report edit failed ({he}), falling back to plain text...")
+                        import re
+                        clean_text = re.sub(r'<[^>]+>', '', risk_alert_text)
+                        await status_msg.edit_text(clean_text)
+                else:
+                    await status_msg.edit_text(f"❌ Quantitative evaluation produced no alert output for <b>#{user_symbol}</b>.", parse_mode="HTML")
 
             except Exception as e:
-                logger.error(f"Error querying market analyzer for {resolved}: {e}", exc_info=True)
-                await status_msg.edit_text(f"❌ *Connection Error*: Failed to connect to Market Analyzer API at {MARKET_ANALYZER_URL}.\nDetails: `{str(e)}`", parse_mode="Markdown")
+                logger.error(f"Error during /analyze evaluation of {resolved}: {e}", exc_info=True)
+                await status_msg.edit_text(f"❌ Error during analysis of <b>#{user_symbol}</b>: {html.escape(str(e))}", parse_mode="HTML")
+
 
         elif cmd_type == "gainers":
             min_percent = command.get("min_percent")
@@ -1167,10 +1149,10 @@ async def handle_admin_message(update: Update, context: ContextTypes.DEFAULT_TYP
                 "Evaluate confluences and get entry/exit short signals on demand:\n"
                 "<code>/short_status BTC</code> or <code>/evaluate ETH</code>\n"
                 "<i>(Alternative: <code>CONFIG SHORT_STATUS BTC</code>)</i>\n\n"
-                "1️⃣2️⃣ <b>Market Analysis</b>\n"
-                "Query local market analyzer for regime, microstructure, trade rec and predictions:\n"
-                "<code>/analyze BTC</code> or <code>/analysis ETH</code>\n"
-                "<i>(Alternative: <code>CONFIG ANALYZE BTC</code>)</i>\n\n"
+                "1️⃣2️⃣ <b>Market Analysis & Quantitative Risk Audit</b>\n"
+                "Run quantitative risk audit, squeeze detection, resistance levels & VIP candlestick chart:\n"
+                "<code>/analyze BRUSDT</code> or <code>/analyze BTC</code>\n"
+                "<i>(Alternative: <code>/analysis ETH</code> or <code>CONFIG ANALYZE BTC</code>)</i>\n\n"
                 "1️⃣3️⃣ <b>24h Gainer & Dump Scanner Settings</b>\n"
                 "Get current top gainers list:\n"
                 "<code>/gainers</code> or <code>/gainers 30</code>\n"
